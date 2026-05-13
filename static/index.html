@@ -80,9 +80,10 @@
 
       // 動的に追加した <script type="text/babel"> は Babel が自動変換しないため、
       // fetch でJSXソースを取得→ Babel.transform → inline <script> で実行する。
+      const _v = Date.now(); // キャッシュ無効化
       const files = ['shared.jsx', 'ui-common.jsx', 'variant-a.jsx'];
       for (const f of files) {
-        const src = await (await fetch(f)).text();
+        const src = await (await fetch(f + '?v=' + _v)).text();
         const out = Babel.transform(src, { presets: ['react'] }).code;
         const s = document.createElement('script');
         s.textContent = out;
