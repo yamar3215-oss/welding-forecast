@@ -2,12 +2,16 @@ services:
   - type: web
     name: welding-forecast
     runtime: python
+    pythonVersion: "3.12"
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.server:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHONIOENCODING
         value: utf-8
-    disk:
-      name: output
-      mountPath: /opt/render/project/src/output
-      sizeGB: 1
+    # disk は有料プラン (Starter $7/月〜) でのみ利用可能
+    # 無料プランではサーバー再起動ごとに output/ がリセットされるが、
+    # index.html が自動的に /api/run を呼ぶので動作に支障なし
+    # disk:
+    #   name: output
+    #   mountPath: /opt/render/project/src/output
+    #   sizeGB: 1
