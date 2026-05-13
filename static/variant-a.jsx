@@ -2,7 +2,7 @@
    外部DB不要: 全データは window.FORECAST_DATA (サーバーのExcel→JSON変換結果) を参照。
    計算結果はサーバーメモリ + output/ のExcelファイルに保持。Supabase等は不使用。 */
 
-const { useState, useMemo, useCallback } = React;
+const useCallback = React.useCallback;
 
 const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString('ja-JP'));
 
