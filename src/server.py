@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -17,8 +18,42 @@ OUTPUT_DIR = ROOT / "output"
 INPUT_DIR = ROOT / "input"
 STATIC_DIR = ROOT / "static"
 
-
 app = FastAPI(title="溶材会議アプリ API")
+
+# パイプライン実行状態
+_state: dict = {"running": False, "error": None}
+_lock = threading.Lock()
+
+
+def _run_pipeline_bg() -> None:
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "run.py")],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            env=env,
+        )
+        with _lock:
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "")[-800:]
+                _state["error"] = f"exit {proc.returncode}: {tail}"
+            else:
+                _state["error"] = None
+    except subprocess.TimeoutExpired:
+        with _lock:
+            _state["error"] = "パイプライン実行が10分を超えました"
+    except Exception as e:
+        with _lock:
+            _state["error"] = str(e)
+    finally:
+        with _lock:
+            _state["running"] = False
 
 
 def _latest_res() -> Path:
@@ -46,6 +81,12 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.get("/api/status")
+def status() -> dict:
+    with _lock:
+        return {"running": _state["running"], "error": _state["error"]}
+
+
 @app.get("/api/latest")
 def latest() -> dict:
     res = _latest_res()
@@ -54,30 +95,15 @@ def latest() -> dict:
 
 @app.post("/api/run")
 def run() -> dict:
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(ROOT / "run.py")],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "パイプライン実行が10分を超えました")
+    with _lock:
+        if _state["running"]:
+            return {"status": "already_running"}
+        _state["running"] = True
+        _state["error"] = None
 
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "")[-800:]
-        raise HTTPException(
-            500,
-            f"パイプライン失敗 (exit {proc.returncode}): {tail}",
-        )
-
-    res = _latest_res()
-    return convert_to_dict(res, _actual_path(), _log_path())
+    t = threading.Thread(target=_run_pipeline_bg, daemon=True)
+    t.start()
+    return {"status": "started"}
 
 
 # 静的配信は最後にマウント (API ルートと衝突しないように)

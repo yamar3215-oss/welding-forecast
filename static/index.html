@@ -32,11 +32,43 @@
     function fail(msg) {
       root.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;font-family:sans-serif;white-space:pre-wrap">エラー: ' + msg + '</div>';
     }
+    function showRunning(sec) {
+      root.innerHTML = '<div style="padding:40px;text-align:center;color:#64748b;font-family:sans-serif">' +
+        '予測計算中… (' + sec + '秒経過)<br><small>初回は1〜3分かかります。このままお待ちください。</small></div>';
+    }
+
+    // /api/latest が 200 を返すまでポーリング（最大 10 分）
+    async function waitForResult() {
+      const start = Date.now();
+      while (Date.now() - start < 600_000) {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        showRunning(elapsed);
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+          const r = await fetch('/api/latest');
+          if (r.ok) return r;
+          // エラー確認
+          const st = await fetch('/api/status');
+          if (st.ok) {
+            const s = await st.json();
+            if (!s.running && s.error) {
+              fail('パイプライン失敗: ' + s.error);
+              return null;
+            }
+          }
+        } catch (_) { /* ネットワーク一時エラーは無視 */ }
+      }
+      fail('タイムアウト: 10分経過しても結果が得られませんでした');
+      return null;
+    }
+
     try {
       let res = await fetch('/api/latest');
       if (res.status === 404) {
-        root.innerHTML = '<div style="padding:40px;text-align:center;color:#64748b;font-family:sans-serif">予測未実行のため初回計算中… (1〜2分かかります)</div>';
-        res = await fetch('/api/run', { method: 'POST' });
+        // バックグラウンドでパイプラインを起動し、即座に返る
+        await fetch('/api/run', { method: 'POST' });
+        res = await waitForResult();
+        if (!res) return;
       }
       if (!res.ok) {
         let t = '';
