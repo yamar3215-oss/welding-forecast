@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # 入力ファイルをホストから差し替える場合はここを使う
+      - ./input:/app/input
+      # 出力ファイルをホストに書き出す
+      - ./output:/app/output
+    restart: unless-stopped

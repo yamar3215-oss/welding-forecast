@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+output/*.xlsx
+output/*.txt
+.DS_Store
+.git/
+.Rhistory
+tests/
+*.command
+INSTALL_macOS.md

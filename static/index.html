@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>溶材会議アプリ 在庫ダッシュボード — A案</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <style>
+    html, body, #root { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
+      background: #f8fafc;
+    }
+    button { font-family: inherit; }
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div style="padding:40px;text-align:center;font-family:sans-serif;color:#64748b">
+      予測データを読み込み中…
+    </div>
+  </div>
+
+  <script>
+  (async function bootstrap() {
+    const root = document.getElementById('root');
+    function fail(msg) {
+      root.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;font-family:sans-serif;white-space:pre-wrap">エラー: ' + msg + '</div>';
+    }
+    try {
+      let res = await fetch('/api/latest');
+      if (res.status === 404) {
+        root.innerHTML = '<div style="padding:40px;text-align:center;color:#64748b;font-family:sans-serif">予測未実行のため初回計算中… (1〜2分かかります)</div>';
+        res = await fetch('/api/run', { method: 'POST' });
+      }
+      if (!res.ok) {
+        let t = '';
+        try { t = (await res.json()).detail || ''; } catch (_) { t = await res.text(); }
+        fail(t || res.statusText);
+        return;
+      }
+      window.FORECAST_DATA = await res.json();
+
+      // 動的に追加した <script type="text/babel"> は Babel が自動変換しないため、
+      // fetch でJSXソースを取得→ Babel.transform → inline <script> で実行する。
+      const files = ['shared.jsx', 'ui-common.jsx', 'variant-a.jsx'];
+      for (const f of files) {
+        const src = await (await fetch(f)).text();
+        const out = Babel.transform(src, { presets: ['react'] }).code;
+        const s = document.createElement('script');
+        s.textContent = out;
+        document.body.appendChild(s);
+      }
+      const renderCode = Babel.transform(
+        "ReactDOM.createRoot(document.getElementById('root')).render(<VariantA />);",
+        { presets: ['react'] }
+      ).code;
+      const mount = document.createElement('script');
+      mount.textContent = renderCode;
+      document.body.appendChild(mount);
+    } catch (e) {
+      fail(e.message || String(e));
+    }
+  })();
+  </script>
+</body>
+</html>
