@@ -3,7 +3,7 @@ __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
-output/*.xlsx
-output/*.txt
+# output/ はGitに含める（Renderのスリープ復帰時に即座に表示するため）
+# 入力データ更新後は run.py を実行して output/ を再コミットすること
 .DS_Store
 .Rhistory
