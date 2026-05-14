@@ -118,6 +118,7 @@ function buildMaterials(fd) {
       totalForecast12m: s.total_forecast_12m,
       totalOrder12m: s.total_order_12m,
       isStockSynthesized: (s.current_stock_kg == null),
+      mapePct: (s.mape_pct != null) ? s.mape_pct : null,
     };
   });
 }

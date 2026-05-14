@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import datetime
@@ -69,12 +70,25 @@ def _scalar(v: Any) -> Any:
     return v
 
 
+def _load_per_sku_mape(res_path: str | Path) -> dict[str, float]:
+    """output/ ディレクトリの per_sku_mape.json を読み込む."""
+    p = Path(res_path).parent / "per_sku_mape.json"
+    if not p.exists():
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def convert_to_dict(
     res_path: str | Path,
     actual_path: str | Path | None = None,
     log_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """RES.xlsx + _1.xlsx + ログ → フロント用 dict."""
+    per_sku_mape = _load_per_sku_mape(res_path)
     res_df = read_forecast_result(str(res_path))
     if len(res_df) == 0:
         raise ValueError(f"RES.xlsx にデータがありません: {res_path}")
@@ -123,6 +137,7 @@ def convert_to_dict(
             "stock_evaluation_yama": None,
             "stock_evaluation_ym": None,
             "current_stock_kg": None,
+            "mape_pct": per_sku_mape.get(str(sku_id)),
         })
 
     sku_records.sort(key=lambda s: s["total_forecast_12m"], reverse=True)

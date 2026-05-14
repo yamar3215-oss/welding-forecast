@@ -450,16 +450,19 @@ function VariantA() {
     selectedSku ? enriched.find(m => m.sku === selectedSku) : null,
     [selectedSku, enriched]);
 
-  // 個別銘柄の変動係数（MAPEの代理指標）
+  // 個別銘柄MAPE（ホールドアウト検証で算出済みの実MAPE）
+  const skuMape = selectedMaterial ? selectedMaterial.mapePct : null;
+
+  // MAPEが未算出のSKU向けフォールバック：変動係数（参考指標）
   const skuCV = useMemo(() => {
-    if (!selectedMaterial) return null;
+    if (!selectedMaterial || skuMape != null) return null;
     const arr = (selectedMaterial.monthlyForecastArr || []).filter(v => v > 0);
     if (arr.length < 2) return null;
     const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
     if (mean <= 0) return null;
     const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
     return Math.round(Math.sqrt(variance) / mean * 100);
-  }, [selectedMaterial]);
+  }, [selectedMaterial, skuMape]);
 
   const displayed = useMemo(() => {
     let list = filter === 'urgent'
@@ -501,11 +504,19 @@ function VariantA() {
   const thProps = { curKey: sortKey, curDir: sortDir, onClick: handleSort };
   const mDate = (typeof fmtYM === 'function' && typeof MEETING_DATE !== 'undefined') ? fmtYM(MEETING_DATE) : '—';
 
+  // MAPEの色分け（低いほど良い）
+  const mapeColor = (pct) => {
+    if (pct == null) return '#94a3b8';
+    if (pct < 30) return '#15803d';
+    if (pct < 60) return '#b45309';
+    return '#dc2626';
+  };
+
   // KPIカードデータ
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
-    { label: `推奨発注量（${fMonths}か月）`, value: fmt(selectedMaterial.orderSum) + ' kg', unit: `個別MAPE: データなし / 変動係数: ${skuCV != null ? skuCV + '%' : '—'}`, color: '#0f172a' },
+    { label: `推奨発注量（${fMonths}か月）`, value: fmt(selectedMaterial.orderSum) + ' kg', unit: `全体MAPE参考: ${mape_pct}%`, color: '#0f172a' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: '予測精度（MAPE）', value: summary.mape_constrained != null ? summary.mape_constrained + '%' : '—', unit: '数値が低いほど精度が高い', color: summary.mape_constrained != null && summary.mape_constrained < 80 ? '#15803d' : '#b45309' },
@@ -617,13 +628,25 @@ function VariantA() {
           {selectedMaterial && (
             <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '12px', border: '1px solid #bae6fd' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: '#0ea5e9', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>選択中の銘柄</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>{selectedMaterial.code}</div>
-              <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.6 }}>
-                変動係数: {skuCV != null ? skuCV + '%' : '—'}<br/>
-                全体MAPE参考: {mape_pct}%
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 8 }}>{selectedMaterial.code}</div>
+              <div style={{ fontSize: 11, marginBottom: 4 }}>
+                <span style={{ color: '#64748b' }}>個別MAPE: </span>
+                {skuMape != null ? (
+                  <b style={{ color: mapeColor(skuMape), fontSize: 14 }}>{skuMape}%</b>
+                ) : (
+                  <span style={{ color: '#94a3b8' }}>—</span>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>
+                全体MAPE: {mape_pct}%
+                {skuMape != null && (
+                  <span style={{ color: skuMape < mape_pct ? '#15803d' : '#dc2626', marginLeft: 4 }}>
+                    ({skuMape < mape_pct ? '↑良好' : '↓低精度'})
+                  </span>
+                )}
               </div>
               <button onClick={() => setSelectedSku(null)} style={{
-                marginTop: 8, fontSize: 11, padding: '4px 10px', borderRadius: 6,
+                fontSize: 11, padding: '4px 10px', borderRadius: 6,
                 background: '#fff', border: '1px solid #bae6fd',
                 color: '#0ea5e9', cursor: 'pointer', width: '100%', fontWeight: 600 }}>
                 選択解除
@@ -654,10 +677,27 @@ function VariantA() {
                   <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
                     {selectedMaterial.code} — 月次予測（消費量 kg）
                   </div>
-                  <div style={{ display: 'flex', gap: 12, alignItems: 'center', fontSize: 11, color: '#64748b' }}>
-                    <span>個別MAPE: <b style={{ color: '#94a3b8' }}>データなし</b></span>
-                    <span>変動係数: <b style={{ color: '#475569' }}>{skuCV != null ? skuCV + '%' : '—'}</b></span>
-                    <span>全体MAPE参考: <b style={{ color: summary.mape_constrained < 80 ? '#15803d' : '#b45309' }}>{mape_pct}%</b></span>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {skuMape != null ? (
+                      <span style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '3px 10px', fontSize: 12 }}>
+                        個別MAPE:&nbsp;
+                        <b style={{ fontSize: 16, color: mapeColor(skuMape) }}>{skuMape}%</b>
+                        <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>（直近9ヶ月ホールドアウト）</span>
+                      </span>
+                    ) : (
+                      <span style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '3px 10px', fontSize: 12 }}>
+                        個別MAPE: <b style={{ color: '#94a3b8' }}>—</b>
+                        {skuCV != null && <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>変動係数: {skuCV}%</span>}
+                      </span>
+                    )}
+                    <span style={{ fontSize: 11, color: '#94a3b8', padding: '3px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6 }}>
+                      全体MAPE: <b style={{ color: mapeColor(mape_pct) }}>{mape_pct}%</b>
+                      {skuMape != null && mape_pct != null && (
+                        <span style={{ marginLeft: 4, color: skuMape < mape_pct ? '#15803d' : '#dc2626' }}>
+                          {skuMape < mape_pct ? `（全体より${(mape_pct - skuMape).toFixed(1)}pt 良好）` : `（全体より${(skuMape - mape_pct).toFixed(1)}pt 低精度）`}
+                        </span>
+                      )}
+                    </span>
                   </div>
                 </div>
                 <SkuForecastChart material={selectedMaterial} months={months} mape_pct={mape_pct} ships={SHIPS}/>

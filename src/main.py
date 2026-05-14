@@ -1,6 +1,7 @@
 """CLIエントリ: 入力Excelから予測レポートを生成する."""
 import argparse
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import numpy as np
@@ -160,6 +161,16 @@ def main():
                 f"(改善: {improvement:+.1f} pt)")
     else:
         log("  - MAPE算出不可 (学習データ不足)")
+
+    # 個別SKU MAPE を JSON 保存（フロントエンドで銘柄詳細表示に利用）
+    per_sku_df = holdout_result.get("per_sku", pd.DataFrame())
+    if len(per_sku_df) > 0:
+        Path(args.output_dir).mkdir(exist_ok=True)
+        per_sku_mape = per_sku_df.set_index("sku_id")["mape_%"].round(1).to_dict()
+        per_sku_path = os.path.join(args.output_dir, "per_sku_mape.json")
+        with open(per_sku_path, "w", encoding="utf-8") as f:
+            json.dump(per_sku_mape, f, ensure_ascii=False, indent=2)
+        log(f"  - 個別MAPE ({len(per_sku_mape)}銘柄): {per_sku_path}")
 
     log("[5/8] 月次予測生成")
     # 仕様: forecast 起点 = train_end + 1 (= 「出庫または在庫が登録されている最新月」の翌月).
