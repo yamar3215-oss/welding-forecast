@@ -11,12 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# アプリ本体をコピー（.venv / output は .dockerignore で除外）
-COPY src/        ./src/
-COPY static/     ./static/
-COPY config/     ./config/
-COPY input/      ./input/
-COPY run.py      .
+# アプリ本体をコピー
+COPY src/              ./src/
+COPY static/           ./static/
+COPY config/           ./config/
+COPY input/            ./input/
+COPY run.py            .
+# JSONキャッシュ（Render再起動直後に /api/latest が即座に返せるよう同梱）
+COPY forecast_data.json .
 
 # 出力ディレクトリを用意（ボリュームマウント時も利用可能）
 RUN mkdir -p output
