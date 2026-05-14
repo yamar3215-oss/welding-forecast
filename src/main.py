@@ -228,8 +228,24 @@ def main():
                     + (f"…他{len(no_mape) - 10}件" if len(no_mape) > 10 else ""))
         log(f"  - 個別MAPE ({len(per_sku_mape)}銘柄有効): {per_sku_path}")
 
+    # 月別MAPE (HO検証期間内の各月ごと全SKU平均)
+    per_month_df = holdout_result.get("per_month", pd.DataFrame())
+    if len(per_month_df) > 0:
+        mape_by_month = per_month_df.set_index("year_month")["mape_%"].round(1).to_dict()
+        with open(os.path.join(args.output_dir, "mape_by_month.json"), "w", encoding="utf-8") as f:
+            json.dump(mape_by_month, f, ensure_ascii=False, indent=2)
+
+    # SKU×月別MAPE
+    per_sku_month_df = holdout_result.get("per_sku_month", pd.DataFrame())
+    if len(per_sku_month_df) > 0:
+        per_sku_month_dict: dict = {}
+        for _, row in per_sku_month_df.iterrows():
+            per_sku_month_dict.setdefault(row["sku_id"], {})[row["year_month"]] = round(float(row["mape_%"]), 1)
+        with open(os.path.join(args.output_dir, "mape_by_sku_month.json"), "w", encoding="utf-8") as f:
+            json.dump(per_sku_month_dict, f, ensure_ascii=False, indent=2)
+
     # ALS × 2 回分の大きなオブジェクトを即時解放
-    del holdout_result, holdout_baseline, per_sku_df
+    del holdout_result, holdout_baseline, per_sku_df, per_month_df, per_sku_month_df
     gc.collect()
 
     log("[5/8] 月次予測生成")

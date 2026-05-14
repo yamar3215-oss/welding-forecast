@@ -120,6 +120,7 @@ function buildMaterials(fd) {
       isStockSynthesized: (s.current_stock_kg == null),
       mapePct: (s.mape_pct != null) ? s.mape_pct : null,
       mapeReason: s.mape_reason || null,
+      mapeByMonth: s.mape_by_month || {},
       usage: s.usage || null,
     };
   });

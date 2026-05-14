@@ -176,8 +176,22 @@ def compute_holdout_mape(
         ])
         per_sku = pd.concat([per_sku, zero_rows], ignore_index=True)
 
+    # 月別MAPE (全SKU平均)
+    per_month = (
+        merged_nonzero.groupby("year_month")["abs_pct_err"].mean().reset_index()
+    )
+    per_month["mape_%"] = per_month["abs_pct_err"] * 100
+
+    # SKU×月別MAPE
+    per_sku_month = (
+        merged_nonzero.groupby(["sku_id", "year_month"])["abs_pct_err"]
+        .mean().reset_index()
+    )
+    per_sku_month["mape_%"] = per_sku_month["abs_pct_err"] * 100
+
     overall = float(merged_nonzero["abs_pct_err"].mean() * 100)
-    return {"mape": overall, "per_sku": per_sku}
+    return {"mape": overall, "per_sku": per_sku,
+            "per_month": per_month, "per_sku_month": per_sku_month}
 
 
 def compute_cv_mape(

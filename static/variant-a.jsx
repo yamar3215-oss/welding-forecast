@@ -468,6 +468,184 @@ function OrderRationalePanel({ material, ships, months }) {
   );
 }
 
+// ──── MAPEトレンド + 将来学習曲線グラフ ────
+// 学習曲線モデル: MAPE(n) ≈ MAPE_now * (n_now / n)^0.35
+// 実MAPEデータ(mapeByMonth)がある場合はそれを表示、ない場合はシミュレーションのみ
+function MapeHistoryChart({ material, globalMapeByMonth }) {
+  const W = 900, H = 160, PL = 56, PR = 24, PT = 18, PB = 36;
+  const iW = W - PL - PR, iH = H - PT - PB;
+  const currentMape = material.mapePct;
+  const mapeByMonth = material.mapeByMonth || {};
+  const allGlobal = globalMapeByMonth || {};
+
+  // 学習曲線パラメータ
+  // 現在のトレーニングデータ期間を推定 (FORECAST_DATA.period_startから逆算)
+  const fd = window.FORECAST_DATA || {};
+  const periodStart = fd.period_start || '';
+  const generatedAt = fd.generated_at || '';
+  // トレーニング期間: periodStart - 18ヶ月分がデータ開始と仮定 (HO 9ヶ月 + 訓練最低9ヶ月)
+  const trainMonthsNow = 18;
+
+  // 実績MAPEデータ (SKU固有またはグローバル月別)
+  const actualMonths = Object.keys(mapeByMonth).length > 0 ? mapeByMonth :
+                       Object.keys(allGlobal).length > 0 ? allGlobal : {};
+  const hasMapeHistory = Object.keys(actualMonths).length > 0;
+
+  // 表示する月範囲: 過去12ヶ月〜将来24ヶ月 (from now)
+  // periodStartから逆算して "now" に対応する学習月数を求める
+  const N_PAST = 18, N_FUTURE = 24;
+  // 学習曲線: MAPE(n) = mape_now * (trainMonthsNow / n)^0.35
+  const LC_ALPHA = 0.35;
+  const lcMape = (n) => currentMape != null ? currentMape * Math.pow(trainMonthsNow / Math.max(1, n), LC_ALPHA) : null;
+
+  // X軸: 学習月数ラベル (過去は実績、将来はシミュレーション)
+  const xPoints = [];
+  for (let i = -N_PAST; i <= N_FUTURE; i += 3) {
+    xPoints.push({ n: trainMonthsNow + i, label: i === 0 ? '現在' : i > 0 ? `+${i}ヶ月` : `${i}ヶ月` });
+  }
+
+  if (currentMape == null && !hasMapeHistory) {
+    return (
+      <div style={{ fontSize: 11, color: '#94a3b8', padding: '8px 0' }}>
+        この銘柄のMAPEデータがまだ蓄積されていません（実績月数が不足）
+      </div>
+    );
+  }
+
+  const n_min = Math.max(1, trainMonthsNow - N_PAST);
+  const n_max = trainMonthsNow + N_FUTURE;
+  // Y軸: 0〜100%
+  const maxY = 100;
+
+  const sx = (n) => PL + ((n - n_min) / (n_max - n_min)) * iW;
+  const sy = (pct) => PT + (1 - Math.min(Math.max(pct, 0), maxY) / maxY) * iH;
+
+  // 将来学習曲線ポイント
+  const futurePts = [];
+  for (let n = trainMonthsNow; n <= n_max; n += 1) {
+    const v = lcMape(n);
+    if (v != null) futurePts.push([sx(n), sy(v)]);
+  }
+  const futurePoly = futurePts.map(([x, y]) => `${x},${y}`).join(' ');
+
+  // 過去学習曲線ポイント (シミュレーション)
+  const pastPts = [];
+  for (let n = n_min; n <= trainMonthsNow; n += 1) {
+    const v = lcMape(n);
+    if (v != null) pastPts.push([sx(n), sy(v)]);
+  }
+  const pastPoly = pastPts.map(([x, y]) => `${x},${y}`).join(' ');
+
+  // 実績データポイント (ある場合)
+  const actualPts = Object.entries(actualMonths).sort(([a], [b]) => a.localeCompare(b)).map(([ym, v], idx) => {
+    // ym → 近似学習月数 (periodStartから逆算: 単純に idx-N_PASTとして描画)
+    const n = n_min + idx * ((N_PAST) / Math.max(1, Object.keys(actualMonths).length - 1));
+    return [sx(n), sy(v), v, ym];
+  });
+
+  const yTicks = [0, 30, 50, 75, 100].map(v => ({ v, y: sy(v) }));
+
+  // 12ヶ月後・24ヶ月後の予測MAPE
+  const mape12 = lcMape(trainMonthsNow + 12);
+  const mape24 = lcMape(trainMonthsNow + 24);
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', marginBottom: 4 }}>
+        予測精度 (MAPE) トレンドと将来シミュレーション
+      </div>
+      <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
+        {hasMapeHistory
+          ? `ホールドアウト検証期間（直近9ヶ月）の月別MAPE実績と、今後データが蓄積された場合の改善予測（学習曲線モデル、α=${LC_ALPHA}）`
+          : `現在のMAPE ${Math.round(currentMape)}% を基点に、今後のデータ蓄積による改善を学習曲線モデル（MAPE∝n^-${LC_ALPHA}）でシミュレーション`
+        }
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+        {/* 背景バンド: 良好(緑)/ 注意(黄)/ 要注意(赤) */}
+        <rect x={PL} y={sy(30)} width={iW} height={sy(0) - sy(30)} fill="#dcfce7" fillOpacity={0.4}/>
+        <rect x={PL} y={sy(50)} width={iW} height={sy(30) - sy(50)} fill="#fef9c3" fillOpacity={0.5}/>
+        <rect x={PL} y={sy(100)} width={iW} height={sy(50) - sy(100)} fill="#fee2e2" fillOpacity={0.4}/>
+
+        {yTicks.map((t, i) => (
+          <g key={i}>
+            <line x1={PL} y1={t.y} x2={W - PR} y2={t.y} stroke="#e2e8f0" strokeWidth={0.8}/>
+            <text x={PL - 4} y={t.y + 3} textAnchor="end" fontSize={9} fill="#94a3b8">{t.v}%</text>
+          </g>
+        ))}
+
+        {/* 「現在」縦線 */}
+        <line x1={sx(trainMonthsNow)} y1={PT} x2={sx(trainMonthsNow)} y2={PT + iH}
+          stroke="#64748b" strokeWidth={1} strokeDasharray="4 3"/>
+        <text x={sx(trainMonthsNow)} y={PT - 4} textAnchor="middle" fontSize={8} fill="#64748b">現在</text>
+
+        {/* 12/24ヶ月後縦線 */}
+        {[12, 24].map(m => (
+          <g key={m}>
+            <line x1={sx(trainMonthsNow + m)} y1={PT} x2={sx(trainMonthsNow + m)} y2={PT + iH}
+              stroke="#94a3b8" strokeWidth={0.7} strokeDasharray="2 3"/>
+            <text x={sx(trainMonthsNow + m)} y={PT - 4} textAnchor="middle" fontSize={8} fill="#94a3b8">+{m}ヶ月</text>
+          </g>
+        ))}
+
+        {/* 過去学習曲線 (グレー破線) */}
+        {pastPoly && <polyline points={pastPoly} fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 3"/>}
+
+        {/* 将来学習曲線 (青破線) */}
+        {futurePoly && <polyline points={futurePoly} fill="none" stroke="#0ea5e9" strokeWidth={1.8} strokeDasharray="5 3"/>}
+
+        {/* 実績データポイント */}
+        {actualPts.map(([x, y, v, ym], i) => (
+          <g key={i}>
+            <circle cx={x} cy={y} r={4} fill={mapeColor(v)} stroke="#fff" strokeWidth={1}/>
+            <text x={x} y={y - 7} textAnchor="middle" fontSize={8} fill={mapeColor(v)}>{Math.round(v)}%</text>
+          </g>
+        ))}
+
+        {/* 現在MAPEドット */}
+        {currentMape != null && (
+          <g>
+            <circle cx={sx(trainMonthsNow)} cy={sy(currentMape)} r={5}
+              fill={mapeColor(currentMape)} stroke="#fff" strokeWidth={1.5}/>
+            <text x={sx(trainMonthsNow) + 8} y={sy(currentMape) + 3} fontSize={10} fontWeight={700}
+              fill={mapeColor(currentMape)}>{Math.round(currentMape)}%</text>
+          </g>
+        )}
+
+        {/* 12/24ヶ月後の予測値ラベル */}
+        {mape12 != null && (
+          <text x={sx(trainMonthsNow + 12) + 4} y={sy(mape12) - 4} fontSize={9} fill="#0ea5e9">
+            {Math.round(mape12)}%見込
+          </text>
+        )}
+        {mape24 != null && (
+          <text x={sx(trainMonthsNow + 24) + 4} y={sy(mape24) - 4} fontSize={9} fill="#0ea5e9">
+            {Math.round(mape24)}%見込
+          </text>
+        )}
+
+        <line x1={PL} y1={PT} x2={PL} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
+        <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
+
+        {/* 凡例 */}
+        <circle cx={PL+8} cy={PT-7} r={3.5} fill={mapeColor(currentMape)}/>
+        <text x={PL+14} y={PT-4} fontSize={8} fill="#475569">現在MAPE</text>
+        <line x1={PL+70} y1={PT-7} x2={PL+82} y2={PT-7} stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="3 2"/>
+        <text x={PL+85} y={PT-4} fontSize={8} fill="#475569">学習曲線(過去)</text>
+        <line x1={PL+165} y1={PT-7} x2={PL+177} y2={PT-7} stroke="#0ea5e9" strokeWidth={1.5} strokeDasharray="4 2"/>
+        <text x={PL+180} y={PT-4} fontSize={8} fill="#475569">将来予測（シミュレーション）</text>
+      </svg>
+      {(mape12 != null || mape24 != null) && (
+        <div style={{ fontSize: 11, color: '#475569', marginTop: 6, background: '#f0f9ff',
+          borderRadius: 6, padding: '6px 10px', border: '1px solid #bae6fd' }}>
+          {mape12 != null && <span>12ヶ月後(データ蓄積): <b style={{ color: mapeColor(mape12) }}>{Math.round(mape12)}%</b>見込 &nbsp;|&nbsp;</span>}
+          {mape24 != null && <span>24ヶ月後: <b style={{ color: mapeColor(mape24) }}>{Math.round(mape24)}%</b>見込 &nbsp;|&nbsp;</span>}
+          <span style={{ color: '#94a3b8' }}>学習曲線モデル（MAPE∝n^-{LC_ALPHA}、経験則ベース） — データ蓄積により精度向上の見込み</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ──── ソート可能テーブルヘッダー ────
 // top: 50 = ページ固定ヘッダー（約48px）の下に追従
 function ThSort({ label, sortKey, curKey, curDir, onClick, textAlign }) {
@@ -519,6 +697,7 @@ function VariantA() {
   const rawSkus = fd.skus || [];
   const series = fd.series || [];
   const globalMape = summary.mape_constrained || 20;
+  const globalMapeByMonth = fd.mape_by_month || {};
 
   // ── 状態 ──
   const [fMonths, setFMonths] = useState(6);       // グラフ表示月数
@@ -1085,12 +1264,23 @@ function VariantA() {
                     </span>
                   </div>
                 </div>
+                {/* グラフ説明: 月次予測と在庫シミュレーション */}
+                <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
+                  <b>消費量予測（青）</b>: 建造スケジュールと過去実績から推定した月別使用量 kg ／
+                  <b> 在庫シミュレーション（カラーライン）</b>: 現在庫から消費を差し引き、選択した発注倍率分を補充した期末在庫推移 ／
+                  <b> 95%CI（水色帯）</b>: MAPE×1.96σを用いた予測誤差範囲
+                </div>
                 <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
                 <OrderRationalePanel material={selectedMaterial} ships={SHIPS} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
+                <MapeHistoryChart material={selectedMaterial} globalMapeByMonth={globalMapeByMonth}/>
               </>
             ) : (
               <>
-                <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', marginBottom: 10 }}>月次予測推移（使用量 kg）</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>月次予測推移（使用量 kg）</div>
+                <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 8, lineHeight: 1.5 }}>
+                  全銘柄合計の月別消費量予測（青）と、在庫管理表に記録された実績消費量（グレー破線）の比較。
+                  水色帯はMAPEから算出した95%信頼区間。表示中フィルターに応じてMAPEが連動します。
+                </div>
                 <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={displayedMape || globalMape} ships={SHIPS} highlightMonths={chartMonths}/>
               </>
             )}

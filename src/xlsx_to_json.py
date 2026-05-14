@@ -91,7 +91,7 @@ def _canonical_sku_id(sku_id: str) -> str:
 
 
 def _load_per_sku_mape(res_path: str | Path) -> tuple[dict[str, float], dict[str, str]]:
-    """output/ の per_sku_mape.json と per_sku_reason.json を読み込む."""
+    """output/ の per_sku_mape.json / per_sku_reason.json / mape_by_month.json / mape_by_sku_month.json を読み込む."""
     base = Path(res_path).parent
     mape: dict[str, float] = {}
     reason: dict[str, str] = {}
@@ -112,6 +112,22 @@ def _load_per_sku_mape(res_path: str | Path) -> tuple[dict[str, float], dict[str
     return mape, reason
 
 
+def _load_mape_monthly(res_path: str | Path) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """output/ の mape_by_month.json と mape_by_sku_month.json を読み込む."""
+    base = Path(res_path).parent
+    by_month: dict[str, float] = {}
+    by_sku_month: dict[str, dict[str, float]] = {}
+    for fn, target in [("mape_by_month.json", by_month), ("mape_by_sku_month.json", by_sku_month)]:
+        p = base / fn
+        if p.exists():
+            try:
+                with open(p, encoding="utf-8") as f:
+                    target.update(json.load(f))
+            except Exception:
+                pass
+    return by_month, by_sku_month
+
+
 def _mape_lookup(sku_id: str, exact: dict, canonical: dict, brand_fallback: dict):
     """3段階フォールバックで値を引く: 完全一致 → 正規化一致 → ブランド一致."""
     if sku_id in exact:
@@ -130,6 +146,7 @@ def convert_to_dict(
 ) -> dict[str, Any]:
     """RES.xlsx + _1.xlsx + ログ → フロント用 dict."""
     per_sku_mape, per_sku_reason = _load_per_sku_mape(res_path)
+    mape_by_month, mape_by_sku_month = _load_mape_monthly(res_path)
     _canon_mape = {_canonical_sku_id(k): v for k, v in per_sku_mape.items()}
     _canon_reason = {_canonical_sku_id(k): v for k, v in per_sku_reason.items()}
     # ブランド部 (first "_" 前) が一意なエントリのみフォールバック索引として使う
@@ -195,6 +212,7 @@ def convert_to_dict(
             "current_stock_kg": None,
             "mape_pct": _mape_lookup(str(sku_id), per_sku_mape, _canon_mape, _brand_mape),
             "mape_reason": _mape_lookup(str(sku_id), per_sku_reason, _canon_reason, _brand_reason),
+            "mape_by_month": mape_by_sku_month.get(str(sku_id), {}),
         })
 
     sku_records.sort(key=lambda s: s["total_forecast_12m"], reverse=True)
@@ -205,7 +223,7 @@ def convert_to_dict(
         actual_df = read_inventory(str(actual_path))
         if len(actual_df) > 0:
             for sku_id, grp in actual_df.groupby("sku_id"):
-                stock_rows = grp[grp["在庫"].notna()].sort_values("year_month")
+                stock_rows = grp[(grp["在庫"].notna()) & (grp["在庫"] > 0)].sort_values("year_month")
                 eval_rows = grp[grp["在庫評価"].notna()].sort_values("year_month")
                 current = float(stock_rows.iloc[-1]["在庫"]) if len(stock_rows) > 0 else None
                 latest_eval = eval_rows.iloc[-1] if len(eval_rows) > 0 else None
@@ -261,4 +279,5 @@ def convert_to_dict(
         "summary": summary,
         "series": series,
         "skus": sku_records,
+        "mape_by_month": mape_by_month,  # HO検証期間内の月別MAPE (全SKU平均)
     }
