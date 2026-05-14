@@ -410,10 +410,12 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
         <text x={PL+16} y={PT-4} fontSize={9} fill="#475569">予測消費量</text>
         <line x1={PL+76} y1={PT-7} x2={PL+92} y2={PT-7} stroke={simColor} strokeWidth={2}
           strokeDasharray={simLevel === 3 ? 'none' : '5 2'}/>
-        <text x={PL+95} y={PT-4} fontSize={9} fill="#475569">在庫({SIM_LABELS[simLevel-1]})</text>
-        <rect x={PL+185} y={PT-13} width={12} height={9}
+        <text x={PL+95} y={PT-4} fontSize={9} fill="#475569">在庫(シミュレ:{SIM_LABELS[simLevel-1]})</text>
+        <line x1={PL+218} y1={PT-7} x2={PL+232} y2={PT-7} stroke="#22c55e" strokeWidth={1} strokeDasharray="4 2" strokeOpacity={0.6}/>
+        <text x={PL+235} y={PT-4} fontSize={9} fill="#94a3b8">パイプライン予測在庫</text>
+        <rect x={PL+335} y={PT-13} width={12} height={9}
           fill="#0ea5e9" fillOpacity={0.2} stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.5} rx={1}/>
-        <text x={PL+199} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
+        <text x={PL+349} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
       </svg>
       <ShipTimeline ships={ships} allYms={months} PL={PL} PR={PR}/>
       {fcArr.length > 0 && ci.length > 0 && (
