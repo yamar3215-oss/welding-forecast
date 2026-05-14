@@ -1,10 +1,13 @@
 """SKU区分別 shape factor を ALS で学習する."""
+import gc
 import logging
 import os
 from calendar import monthrange
 import numpy as np
 import pandas as pd
 from scipy.optimize import nnls
+
+_SKU_BATCH = 50  # compute_kg_given_shape で GC を挟むバッチサイズ
 
 from src.ship_window import _iter_months, _month_overlap_days
 from src.shape_curve import compute_rel_month
@@ -121,20 +124,22 @@ def compute_kg_given_shape(
     skus = sorted(consumption["sku_id"].unique())
     months_all = list(_iter_months(start_ym, end_ym))
     ship_types_all = sorted(ships["ship_type"].unique())
+    # float32 で構築: ALS 設計行列のピークメモリを約 50% 削減
     cons_pivot = (
         consumption
         .pivot_table(index="year_month", columns="sku_id", values="qty_kg", aggfunc="sum")
         .reindex(months_all, fill_value=0.0)
+        .astype(np.float32)
     )
     chem_mask = np.array([is_chemical_ship_type(st) for st in ship_types_all])
     chem_idx = np.where(chem_mask)[0]
     temporal_weights = compute_temporal_weights(months_all, weight_scheme)
 
     records = []
-    for sku in skus:
+    for i_sku, sku in enumerate(skus):
         if sku not in cons_pivot.columns:
             continue
-        y = cons_pivot[sku].to_numpy(dtype=float)
+        y = cons_pivot[sku].to_numpy(dtype=np.float64)  # NNLS は float64 が必要
         A, _, _ = _build_kg_design_matrix(
             ships, sku_id_to_cat, sku, shape, start_ym, end_ym, rel_month_length,
         )
@@ -176,6 +181,9 @@ def compute_kg_given_shape(
                 "r2": r2,
                 "confidence": _confidence_label(int(n_samples_by_type[i])),
             })
+        # _SKU_BATCH 件ごとにGCを実行してピークメモリを抑制
+        if (i_sku + 1) % _SKU_BATCH == 0:
+            gc.collect()
     return pd.DataFrame(records)
 
 
@@ -203,10 +211,12 @@ def compute_shape_given_kg(
     month_idx = {m: i for i, m in enumerate(months)}
     temporal_weights = compute_temporal_weights(months, weight_scheme)
 
+    # float32 で構築してメモリ削減; NNLS 呼び出し時に scipy が float64 へ変換
     cons_pivot = (
         consumption
         .pivot_table(index="year_month", columns="sku_id", values="qty_kg", aggfunc="sum")
         .reindex(months, fill_value=0.0)
+        .astype(np.float32)
     )
 
     categories = sorted(
@@ -221,8 +231,8 @@ def compute_shape_given_kg(
         y_blocks = []
         A_blocks = []
         for sku in cat_skus:
-            y_sku = cons_pivot[sku].to_numpy(dtype=float)
-            A_block = np.zeros((len(months), rel_month_length))
+            y_sku = cons_pivot[sku].to_numpy(dtype=np.float32)
+            A_block = np.zeros((len(months), rel_month_length), dtype=np.float32)
             for _, ship in ships.iterrows():
                 cs = ship["consume_start"]
                 ce = ship["consume_end"]
@@ -245,15 +255,17 @@ def compute_shape_given_kg(
             A_blocks.append(A_block)
         if not y_blocks:
             continue
-        y_concat = np.concatenate(y_blocks)
-        A_concat = np.vstack(A_blocks)
+        y_concat = np.concatenate(y_blocks).astype(np.float64)
+        A_concat = np.vstack(A_blocks).astype(np.float64)
+        del A_blocks, y_blocks  # float32 版を即時解放してから NNLS（float64 コピーのみ使用）
         # 観測順に並んだ temporal_weights を SKU 数分繰り返す
-        w_concat = np.tile(temporal_weights, len(y_blocks))
+        w_concat = np.tile(temporal_weights, len(cat_skus))
         try:
             x, _ = _solve_nnls_l2(A_concat, y_concat, shape_l2, weights=w_concat)
         except Exception as e:
             _logger.warning(f"shape NNLS failed for category {cat}: {e}")
             x = np.full(rel_month_length, 1.0 / rel_month_length)
+        del A_concat, y_concat
         s = x.sum()
         if s > 0:
             x = x / s
@@ -316,6 +328,8 @@ def estimate_kg_and_shape(
                 _logger.info(f"ALS converged at iter {it+1} (change={change:.4f})")
                 break
         prev_resid = resid
+        # ALS 1 反復終了: 前回の unit/shape 中間オブジェクトを解放
+        gc.collect()
 
     return unit, shape
 

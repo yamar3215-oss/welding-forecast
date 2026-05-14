@@ -1,6 +1,7 @@
 """CLIエントリ: 入力Excelから予測レポートを生成する."""
 import argparse
 from datetime import datetime
+import gc
 import json
 import os
 from pathlib import Path
@@ -153,16 +154,19 @@ def main():
         kg_l2=args.kg_l2, shape_l2=args.shape_l2,
         weight_scheme=args.weight_scheme,
     )
+    overall_mape: float | None = None
     if not pd.isna(holdout_result["mape"]):
-        log(f"  - MAPE (制約あり): {holdout_result['mape']:.1f}%")
+        overall_mape = float(holdout_result["mape"])
+        log(f"  - MAPE (制約あり): {overall_mape:.1f}%")
         if not pd.isna(holdout_baseline["mape"]):
-            improvement = holdout_baseline["mape"] - holdout_result["mape"]
+            improvement = holdout_baseline["mape"] - overall_mape
             log(f"  - MAPE (制約なし): {holdout_baseline['mape']:.1f}% "
                 f"(改善: {improvement:+.1f} pt)")
     else:
         log("  - MAPE算出不可 (学習データ不足)")
 
     # 個別SKU MAPE を JSON 保存（フロントエンドで銘柄詳細表示に利用）
+    per_sku_mape: dict[str, float] = {}
     per_sku_df = holdout_result.get("per_sku", pd.DataFrame())
     if len(per_sku_df) > 0:
         Path(args.output_dir).mkdir(exist_ok=True)
@@ -171,6 +175,10 @@ def main():
         with open(per_sku_path, "w", encoding="utf-8") as f:
             json.dump(per_sku_mape, f, ensure_ascii=False, indent=2)
         log(f"  - 個別MAPE ({len(per_sku_mape)}銘柄): {per_sku_path}")
+
+    # ALS × 2 回分の大きなオブジェクトを即時解放
+    del holdout_result, holdout_baseline, per_sku_df
+    gc.collect()
 
     log("[5/8] 月次予測生成")
     # 仕様: forecast 起点 = train_end + 1 (= 「出庫または在庫が登録されている最新月」の翌月).
@@ -201,6 +209,10 @@ def main():
             f"(scale {after_total/before_total if before_total > 0 else 0:.2f})")
     log(f"  - 月次予測レコード: {len(forecast_monthly)}")
 
+    # shape / unit は以降不要: 即時解放
+    del unit, shape
+    gc.collect()
+
     log("[6/8] 在庫評価 (実績)")
     stock_eval = compute_stock_evaluation(inventory, consumption)
     log(f"  - 評価レコード: {len(stock_eval)}")
@@ -211,6 +223,9 @@ def main():
             f"({eval_compare['matched']}/{eval_compare['total']})")
     else:
         log("  - 既存値との比較データなし")
+
+    del stock_eval, eval_compare
+    gc.collect()
 
     log("[7/8] 推奨発注量")
     if len(inventory) > 0:
@@ -236,6 +251,10 @@ def main():
         int(orders["手配済み"].sum()) if len(orders) > 0 and "手配済み" in orders.columns else 0
     )
     log(f"  - 推奨発注レコード: {len(orders)} (うち確定 {n_confirmed})")
+
+    # 発注計算に使った大きなオブジェクトを解放（forecast_monthly は Supabase 保存まで保持）
+    del current_stock, planned_in_inventory, consumption, inventory
+    gc.collect()
 
     order_validation_result = None
     if args.inventory_validate:
@@ -276,6 +295,21 @@ def main():
         f.write("\n\n=== 警告 ===\n")
         f.write("\n".join(warnings_list))
     log(f"  - ログ: {log_path}")
+
+    # Supabase への予測結果・MAPE 蓄積（環境変数が設定されている場合のみ）
+    from src.supabase_client import SupabaseClient
+    db = SupabaseClient()
+    if db.enabled:
+        run_at = datetime.now().isoformat()
+        db.save_forecast(run_at, train_end, forecast_monthly, per_sku_mape)
+        if overall_mape is not None:
+            db.save_mape(run_at, train_end, overall_mape, per_sku_mape)
+        log(f"  - Supabase 保存完了 (予測 {len(forecast_monthly)} 件, MAPE {len(per_sku_mape)} 銘柄)")
+    else:
+        log("  - Supabase: 未設定 (SUPABASE_URL / SUPABASE_KEY 未設定につきスキップ)")
+
+    del forecast_monthly
+    gc.collect()
     log("=== 完了 ===")
 
 
