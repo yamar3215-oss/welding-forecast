@@ -435,6 +435,8 @@ function VariantA() {
   const [filter, setFilter] = useState('all');
   const [running, setRunning] = useState(false);
   const [runMsg, setRunMsg] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState('');
   const [selectedSku, setSelectedSku] = useState(null);
 
   const enriched = useMemo(() => MATERIALS.map(m => {
@@ -501,6 +503,33 @@ function VariantA() {
     setRunning(false);
   };
 
+  const handleUploadFile = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+      setUploadMsg('⚠ xlsx ファイルのみ対応しています');
+      return;
+    }
+    setUploading(true);
+    setUploadMsg('アップロード中...');
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'アップロード失敗');
+      }
+      const data = await res.json();
+      setUploadMsg(`✓ ${data.filename} を受信しました。「予測を再実行」ボタンで反映してください。`);
+    } catch (err) {
+      setUploadMsg(`エラー: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const thProps = { curKey: sortKey, curDir: sortDir, onClick: handleSort };
   const mDate = (typeof fmtYM === 'function' && typeof MEETING_DATE !== 'undefined') ? fmtYM(MEETING_DATE) : '—';
 
@@ -546,8 +575,16 @@ function VariantA() {
             </div>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#93c5fd' }}>溶材会議日：{mDate}</div>
+          <label style={{
+            background: uploading ? '#334155' : '#059669', color: '#fff',
+            borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 13,
+            cursor: uploading ? 'not-allowed' : 'pointer', display: 'inline-block', userSelect: 'none' }}>
+            <input type="file" accept=".xlsx" onChange={handleUploadFile}
+              style={{ display: 'none' }} disabled={uploading} />
+            {uploading ? '送信中…' : '📤 Excel更新'}
+          </label>
           <button onClick={handleRerun} disabled={running} style={{
             background: running ? '#334155' : '#0ea5e9', color: '#fff', border: 'none',
             borderRadius: 8, padding: '8px 18px', fontWeight: 700, fontSize: 13,
@@ -560,6 +597,19 @@ function VariantA() {
       {runMsg && (
         <div style={{ background: '#eff6ff', padding: '6px 20px', fontSize: 12, color: '#1d4ed8', borderBottom: '1px solid #bfdbfe', flexShrink: 0 }}>
           {runMsg}
+        </div>
+      )}
+      {uploadMsg && (
+        <div style={{
+          background: uploadMsg.startsWith('エラー') ? '#fee2e2' : '#f0fdf4',
+          padding: '6px 20px', fontSize: 12,
+          color: uploadMsg.startsWith('エラー') ? '#dc2626' : '#15803d',
+          borderBottom: '1px solid #bbf7d0', flexShrink: 0,
+          display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ flex: 1 }}>{uploadMsg}</span>
+          <button onClick={() => setUploadMsg('')} style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            color: 'inherit', fontSize: 14, lineHeight: 1, padding: '0 4px' }}>✕</button>
         </div>
       )}
 

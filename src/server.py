@@ -8,7 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 from src.xlsx_to_json import convert_to_dict
@@ -19,6 +19,7 @@ OUTPUT_DIR = ROOT / "output"
 INPUT_DIR = ROOT / "input"
 STATIC_DIR = ROOT / "static"
 CACHE_JSON = ROOT / "forecast_data.json"  # プロジェクトルートに置く（Renderがoutput/を空で上書きするため）
+UPLOAD_INVENTORY = INPUT_DIR / "uploaded_inventory.xlsx"  # Web アップロード先
 
 app = FastAPI(title="溶材会議アプリ API")
 
@@ -133,6 +134,22 @@ def latest() -> dict:
     except Exception:
         pass
     return data
+
+
+@app.post("/api/upload")
+async def upload_inventory(file: UploadFile = File(...)) -> dict:
+    """在庫管理表 Excel をアップロードして次回パイプライン実行で使用する."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="xlsx ファイルのみ対応しています")
+    content = await file.read()
+    if len(content) > 30 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="ファイルサイズ上限 30MB を超えています")
+    if len(content) < 4:
+        raise HTTPException(status_code=400, detail="ファイルが空または破損しています")
+    INPUT_DIR.mkdir(exist_ok=True)
+    UPLOAD_INVENTORY.write_bytes(content)
+    return {"status": "ok", "filename": filename, "size": len(content)}
 
 
 @app.post("/api/run")

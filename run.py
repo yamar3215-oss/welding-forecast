@@ -19,7 +19,9 @@ OUTPUT = ROOT / "output"
 CONFIG = ROOT / "config"
 
 DATA = INPUT / "data.xlsx"
-INV_ACTUAL = INPUT / "溶接棒在庫管理表　在庫評価追加_1.xlsx"
+# Web からアップロードされたファイルを優先; なければデフォルト名を使用
+_UPLOADED_INV = INPUT / "uploaded_inventory.xlsx"
+INV_ACTUAL = _UPLOADED_INV if _UPLOADED_INV.exists() else INPUT / "溶接棒在庫管理表　在庫評価追加_1.xlsx"
 INV_PLAN = INPUT / "溶接棒在庫管理表　在庫評価追加_2.xlsx"
 
 
