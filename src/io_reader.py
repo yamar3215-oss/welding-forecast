@@ -1,5 +1,5 @@
 """Excel入力ファイルの読み込み・正規化."""
-from datetime import date
+from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 from openpyxl import load_workbook
@@ -250,16 +250,30 @@ from src.sku_normalizer import parse_inventory_name
 
 
 _INVENTORY_SHEET_PATTERN = re.compile(r"在庫評価")
+# 発注計画書 (納品表) は「在庫評価」シートを持たないため別パターンでフォールバック
+_PLANNED_ORDERS_SHEET_PATTERN = re.compile(r"在庫評価|在管理表")
+
+# Excel シリアル値 → 年月 変換基点 (1900年バグ込み)
+_EXCEL_EPOCH = date(1899, 12, 30)
 
 
 def _detect_month_columns(row2):
-    """ヘッダ第2行から月列の開始位置とラベルを抽出."""
+    """ヘッダ第2行から月列の開始位置とラベルを抽出.
+
+    対応形式:
+      - datetime / date オブジェクト
+      - Excel シリアル整数 (40000〜70000 ≒ 2009〜2091 年)
+      - "YYYY年M月" 文字列
+    """
     month_cols = {}
     for c, val in enumerate(row2):
         if val is None:
             continue
         if hasattr(val, "year") and hasattr(val, "month"):
             month_cols[c] = f"{val.year:04d}-{val.month:02d}"
+        elif isinstance(val, int) and 40000 <= val <= 70000:
+            dt = _EXCEL_EPOCH + timedelta(days=val)
+            month_cols[c] = f"{dt.year:04d}-{dt.month:02d}"
         else:
             m = re.match(r"(\d{4})年\s*(\d{1,2})月", str(val))
             if m:
@@ -300,10 +314,12 @@ def read_planned_orders(path: str) -> pd.DataFrame:
     """
     wb = load_workbook(path, data_only=True, read_only=True)
     target_sheet = None
+    # 「在庫評価」を優先し、なければ「在管理表」(納品表等) にフォールバック
     for name in wb.sheetnames:
-        if _INVENTORY_SHEET_PATTERN.search(name):
+        if _PLANNED_ORDERS_SHEET_PATTERN.search(name):
             target_sheet = name
-            break
+            if _INVENTORY_SHEET_PATTERN.search(name):
+                break  # 在庫評価シートが見つかれば確定
     if target_sheet is None:
         wb.close()
         return pd.DataFrame(columns=["year_month", "sku_id", "planned_kg"])
@@ -384,24 +400,7 @@ def read_inventory(path: str) -> pd.DataFrame:
     if len(rows) < 4:
         return pd.DataFrame()
 
-    month_cols = {}
-    row2 = rows[1]
-    for c, val in enumerate(row2):
-        if val is None:
-            continue
-        # Handle both datetime and string formats
-        if hasattr(val, "year") and hasattr(val, "month"):
-            # datetime object
-            year = val.year
-            month = val.month
-            month_cols[c] = f"{year:04d}-{month:02d}"
-        else:
-            # String format like "2024年8月"
-            m = re.match(r"(\d{4})年\s*(\d{1,2})月", str(val))
-            if m:
-                year = int(m.group(1))
-                month = int(m.group(2))
-                month_cols[c] = f"{year:04d}-{month:02d}"
+    month_cols = _detect_month_columns(rows[1])
 
     records = []
     last_sku_id = None

@@ -434,8 +434,14 @@ function VariantA() {
   const [filter, setFilter] = useState('all');
   const [running, setRunning] = useState(false);
   const [runMsg, setRunMsg] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState('');
+  const [uploadPanel, setUploadPanel] = useState(false);
+  const [meetingSkus, setMeetingSkus] = useState([]);
+  const [meetingFile, setMeetingFile] = useState(null);
+  const [uploadStates, setUploadStates] = useState({
+    inventory: { uploading: false, msg: '' },
+    data:      { uploading: false, msg: '' },
+    plan:      { uploading: false, msg: '' },
+  });
   const [selectedSku, setSelectedSku] = useState(null);
   const [inactiveSku, setInactiveSku] = useState(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -454,6 +460,12 @@ function VariantA() {
 
   const urgentCount = useMemo(() => enriched.filter(s => s.status === 'risk').length, [enriched]);
   const cautionCount = useMemo(() => enriched.filter(s => s.status === 'caution').length, [enriched]);
+  // 溶材会議: 納品書に含まれる銘柄（なければアラート銘柄にフォールバック）
+  const meetingList = useMemo(() => {
+    if (meetingSkus.length > 0) return enriched.filter(s => meetingSkus.includes(s.sku));
+    return enriched.filter(s => s.status === 'risk' || s.status === 'caution');
+  }, [enriched, meetingSkus]);
+  const meetingCount = meetingList.length;
 
   const selectedMaterial = useMemo(() =>
     selectedSku ? enriched.find(m => m.sku === selectedSku) : null,
@@ -472,9 +484,7 @@ function VariantA() {
   }, [selectedMaterial, skuMape]);
 
   const displayed = useMemo(() => {
-    let list = filter === 'urgent'
-      ? enriched.filter(s => s.status === 'risk' || s.status === 'caution')
-      : [...enriched];
+    let list = filter === 'meeting' ? [...meetingList] : [...enriched];
     list.sort((a, b) => {
       let av = a[sortKey], bv = b[sortKey];
       if (av == null) av = sortDir === 'asc' ? Infinity : -Infinity;
@@ -483,7 +493,7 @@ function VariantA() {
       return sortDir === 'asc' ? av - bv : bv - av;
     });
     return list;
-  }, [enriched, filter, sortKey, sortDir]);
+  }, [enriched, meetingList, filter, sortKey, sortDir]);
 
   // 表示中の稼働銘柄のみのMAPE（フィルター + 非稼働除外 に連動）
   const displayedMape = useMemo(() => {
@@ -527,45 +537,52 @@ function VariantA() {
     setRunning(false);
   };
 
-  const handleUploadFile = async (e) => {
+  const handleUploadFile = async (e, fileType) => {
     const file = e.target.files[0];
     e.target.value = '';
     if (!file) return;
+    const setMsg = (msg, uploading = false) =>
+      setUploadStates(prev => ({ ...prev, [fileType]: { uploading, msg } }));
     if (!file.name.toLowerCase().endsWith('.xlsx')) {
-      setUploadMsg('⚠ xlsx ファイルのみ対応しています');
+      setMsg('⚠ xlsx ファイルのみ対応しています');
       return;
     }
-    setUploading(true);
-    setUploadMsg('アップロード中...');
+    setMsg('アップロード中...', true);
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      const res = await fetch(`/api/upload?file_type=${fileType}`, { method: 'POST', body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || 'アップロード失敗');
       }
       const data = await res.json();
-      setUploadMsg(`✓ ${data.filename} を受信しました。「予測を再実行」ボタンで反映してください。`);
+      setMsg(`✓ ${data.filename} を受信しました`);
     } catch (err) {
-      setUploadMsg(`エラー: ${err.message}`);
-    } finally {
-      setUploading(false);
+      setMsg(`エラー: ${err.message}`);
     }
   };
+
+  // 溶材会議 SKU リストを起動時に取得
+  useEffect(() => {
+    fetch('/api/meeting-skus')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && d.skus) { setMeetingSkus(d.skus); setMeetingFile(d.filename); } })
+      .catch(() => {});
+  }, []);
 
   const thProps = { curKey: sortKey, curDir: sortDir, onClick: handleSort };
   const mDate = (typeof fmtYM === 'function' && typeof MEETING_DATE !== 'undefined') ? fmtYM(MEETING_DATE) : '—';
 
   // ── MAPE KPIカードの動的ラベル・値（フィルター + 非稼働に連動） ──
-  const mapeKpiLabel = filter === 'urgent'
-    ? `要対応MAPE（${displayed.length}銘柄）`
+  const mapeKpiLabel = filter === 'meeting'
+    ? `溶材会議MAPE（${displayed.length}銘柄）`
     : inactiveCount > 0
       ? `稼働MAPE（真の予測精度）`
       : '予測精度 (MAPE)';
   const mapeKpiValue = fmtMape(displayedMape);
-  const mapeKpiUnit = filter === 'urgent'
-    ? `要対応銘柄の平均 ／ 全体: ${fmtMape(globalMape)}`
+  const mapeKpiUnit = filter === 'meeting'
+    ? `溶材会議銘柄の平均 ／ 全体: ${fmtMape(globalMape)}`
     : inactiveCount > 0
       ? `稼働${activeCountInDisplayed}銘柄 ／ 非稼働${inactiveCount}銘柄除外`
       : `全${enriched.length}銘柄の平均`;
@@ -579,7 +596,7 @@ function VariantA() {
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
-    { label: '要対応', value: `${urgentCount + cautionCount}件`, unit: `危険 ${urgentCount}件 ／ 注意 ${cautionCount}件`, color: urgentCount > 0 ? '#dc2626' : cautionCount > 0 ? '#b45309' : '#15803d' },
+    { label: '溶材会議', value: `${meetingCount}件`, unit: meetingSkus.length > 0 ? `納品書: ${meetingFile || '読込済'}` : `危険 ${urgentCount}件 ／ 注意 ${cautionCount}件`, color: urgentCount > 0 ? '#dc2626' : cautionCount > 0 ? '#b45309' : '#0891b2' },
   ];
 
   const kpiCols = isMobile ? '1fr' : isTablet ? 'repeat(2,1fr)' : 'repeat(3,1fr)';
@@ -618,16 +635,13 @@ function VariantA() {
           {!isMobile && (
             <div style={{ fontSize: 16, fontWeight: 700, color: '#93c5fd' }}>溶材会議日：{mDate}</div>
           )}
-          <label style={{
-            background: uploading ? '#334155' : '#059669', color: '#fff',
+          <button onClick={() => setUploadPanel(p => !p)} style={{
+            background: uploadPanel ? '#0f766e' : '#059669', color: '#fff', border: 'none',
             borderRadius: 8, padding: '0 14px', fontWeight: 700, fontSize: 13,
-            cursor: uploading ? 'not-allowed' : 'pointer',
-            userSelect: 'none', minHeight: 44, display: 'flex', alignItems: 'center',
+            cursor: 'pointer', minHeight: 44,
           }}>
-            <input type="file" accept=".xlsx" onChange={handleUploadFile}
-              style={{ display: 'none' }} disabled={uploading} />
-            {uploading ? '送信中…' : '📤 Excel更新'}
-          </label>
+            📤 {isMobile ? 'Excel' : 'Excel更新'} {uploadPanel ? '▲' : '▼'}
+          </button>
           <button onClick={handleRerun} disabled={running} style={{
             background: running ? '#334155' : '#0ea5e9', color: '#fff', border: 'none',
             borderRadius: 8, padding: '0 18px', fontWeight: 700, fontSize: 13,
@@ -643,17 +657,39 @@ function VariantA() {
           {runMsg}
         </div>
       )}
-      {uploadMsg && (
-        <div style={{
-          background: uploadMsg.startsWith('エラー') ? '#fee2e2' : '#f0fdf4',
-          padding: '6px 20px', fontSize: 12,
-          color: uploadMsg.startsWith('エラー') ? '#dc2626' : '#15803d',
-          borderBottom: '1px solid #bbf7d0',
-          display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ flex: 1 }}>{uploadMsg}</span>
-          <button onClick={() => setUploadMsg('')} style={{
-            background: 'none', border: 'none', cursor: 'pointer',
-            color: 'inherit', fontSize: 14, lineHeight: 1, padding: '0 4px' }}>✕</button>
+      {uploadPanel && (
+        <div style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', padding: '12px 20px' }}>
+          <div style={{ fontWeight: 700, fontSize: 12, color: '#475569', marginBottom: 10 }}>
+            ファイルをアップロードして「▶ 予測を再実行」を押してください
+          </div>
+          {[
+            { key: 'inventory', label: '在庫管理表', hint: '_1.xlsx（在庫実績・在庫評価）' },
+            { key: 'data',      label: '銘柄マスタ',  hint: 'data.xlsx（銘柄・消費実績）' },
+            { key: 'plan',      label: '発注計画書',  hint: '_2.xlsx（発注計画・検証用）' },
+          ].map(({ key, label, hint }) => {
+            const st = uploadStates[key];
+            const isErr = st.msg.startsWith('エラー') || st.msg.startsWith('⚠');
+            return (
+              <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 7, flexWrap: 'wrap' }}>
+                <label style={{
+                  background: st.uploading ? '#94a3b8' : '#0891b2', color: '#fff',
+                  borderRadius: 6, padding: '6px 12px', fontWeight: 700, fontSize: 12,
+                  cursor: st.uploading ? 'not-allowed' : 'pointer',
+                  userSelect: 'none', minWidth: 96, textAlign: 'center', whiteSpace: 'nowrap',
+                }}>
+                  <input type="file" accept=".xlsx" onChange={e => handleUploadFile(e, key)}
+                    style={{ display: 'none' }} disabled={st.uploading} />
+                  {st.uploading ? '送信中…' : `📤 ${label}`}
+                </label>
+                <span style={{ fontSize: 11, color: '#94a3b8', minWidth: 160 }}>{hint}</span>
+                {st.msg ? (
+                  <span style={{ fontSize: 11, fontWeight: 600, color: isErr ? '#dc2626' : '#15803d' }}>
+                    {st.msg}
+                  </span>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -667,7 +703,7 @@ function VariantA() {
           <span>総予測 {fmt(summary.total_forecast_kg)} kg</span>
           <span>｜</span>
           <span>
-            {filter === 'urgent' ? '要対応MAPE' : inactiveCount > 0 ? '稼働MAPE' : 'MAPE'}
+            {filter === 'meeting' ? '溶材会議MAPE' : inactiveCount > 0 ? '稼働MAPE' : 'MAPE'}
             <span style={{
               marginLeft: 4, fontWeight: 700,
               color: mapeColor(displayedMape),
@@ -782,7 +818,7 @@ function VariantA() {
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>絞り込み</div>
             {[
               { key: 'all', label: `全銘柄 (${enriched.length}件)` },
-              { key: 'urgent', label: `要対応 (${urgentCount + cautionCount}件)` },
+              { key: 'meeting', label: `溶材会議 (${meetingCount}件)` },
             ].map(({ key, label }) => (
               <button key={key} onClick={() => setFilter(key)} style={{
                 display: 'block', width: '100%', textAlign: 'left',
@@ -796,7 +832,7 @@ function VariantA() {
             {/* フィルター別MAPE速報 */}
             <div style={{ background: '#f8fafc', borderRadius: 6, padding: '6px 10px', border: '1px solid #e2e8f0', marginTop: 4 }}>
               <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 2 }}>
-                {filter === 'urgent' ? '要対応銘柄MAPE' : '表示中MAPE'}
+                {filter === 'meeting' ? '溶材会議MAPE' : '表示中MAPE'}
               </div>
               <div style={{ fontSize: 16, fontWeight: 700, color: mapeColor(displayedMape) }}>
                 {fmtMape(displayedMape)}
@@ -837,7 +873,7 @@ function VariantA() {
                 )}
               </div>
               <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>
-                {filter === 'urgent' ? '要対応' : '全体'}MAPE: {fmtMape(displayedMape)}
+                {filter === 'meeting' ? '溶材会議' : '全体'}MAPE: {fmtMape(displayedMape)}
                 {skuMape != null && (
                   <span style={{ color: skuMape < (displayedMape || globalMape) ? '#15803d' : '#dc2626', marginLeft: 4 }}>
                     ({skuMape < (displayedMape || globalMape) ? '↑良好' : '↓低精度'})
@@ -894,7 +930,7 @@ function VariantA() {
                       <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>（直近9ヶ月HO）</span>
                     </span>
                     <span style={{ fontSize: 11, color: '#94a3b8', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6 }}>
-                      {filter === 'urgent' ? '要対応' : '全体'}MAPE: <b style={{ color: mapeColor(displayedMape) }}>{fmtMape(displayedMape)}</b>
+                      {filter === 'meeting' ? '溶材会議' : '全体'}MAPE: <b style={{ color: mapeColor(displayedMape) }}>{fmtMape(displayedMape)}</b>
                       {skuMape != null && displayedMape != null && (
                         <span style={{ marginLeft: 4, color: skuMape < displayedMape ? '#15803d' : '#dc2626' }}>
                           {skuMape < displayedMape
@@ -920,7 +956,7 @@ function VariantA() {
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #e2e8f0',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>
-                {filter === 'urgent' ? '要対応銘柄 一覧' : '全材料在庫一覧'}
+                {filter === 'meeting' ? `溶材会議 一覧${meetingSkus.length > 0 ? `（納品書: ${meetingFile || ''}）` : ''}` : '全材料在庫一覧'}
                 <span style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginLeft: 8 }}>{displayed.length}銘柄</span>
                 {inactiveCount > 0 && (
                   <span style={{ fontSize: 11, color: '#a16207', background: '#fef9c3', borderRadius: 6, padding: '1px 8px', marginLeft: 8, fontWeight: 600 }}>

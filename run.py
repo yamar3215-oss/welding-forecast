@@ -18,11 +18,14 @@ INPUT = ROOT / "input"
 OUTPUT = ROOT / "output"
 CONFIG = ROOT / "config"
 
-DATA = INPUT / "data.xlsx"
 # Web からアップロードされたファイルを優先; なければデフォルト名を使用
-_UPLOADED_INV = INPUT / "uploaded_inventory.xlsx"
+_UPLOADED_DATA = INPUT / "uploaded_data.xlsx"
+_UPLOADED_INV  = INPUT / "uploaded_inventory.xlsx"
+_UPLOADED_PLAN = INPUT / "uploaded_inventory_plan.xlsx"
+
+DATA     = _UPLOADED_DATA if _UPLOADED_DATA.exists() else INPUT / "data.xlsx"
 INV_ACTUAL = _UPLOADED_INV if _UPLOADED_INV.exists() else INPUT / "溶接棒在庫管理表　在庫評価追加_1.xlsx"
-INV_PLAN = INPUT / "溶接棒在庫管理表　在庫評価追加_2.xlsx"
+INV_PLAN   = _UPLOADED_PLAN if _UPLOADED_PLAN.exists() else INPUT / "溶接棒在庫管理表　在庫評価追加_2.xlsx"
 
 
 def main() -> int:

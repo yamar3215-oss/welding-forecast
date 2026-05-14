@@ -121,7 +121,9 @@ def write_inventory_format(
                 base_sku = sku[: -(len(loc) + 1)]
                 break
 
-        mat = mat_map.get(sku) or mat_map.get(base_sku)
+        mat = mat_map.get(sku)
+        if mat is None:
+            mat = mat_map.get(base_sku)
         if mat is not None:
             brand = mat.get("銘柄", "")
             size = _format_size_label(mat.get("径"), mat.get("単位重量"))

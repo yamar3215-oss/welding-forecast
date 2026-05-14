@@ -71,11 +71,18 @@ def make_sku_id(brand: str, diameter, unit_weight) -> str:
     b = normalize_brand(brand)
     d_str = _extract_number_str(diameter, is_last=False)
     w_str = _extract_number_str(unit_weight, is_last=True)
-    return f"{b}_{d_str}_{w_str}"
+    sku_id = f"{b}_{d_str}_{w_str}"
+    return _SKU_ALIASES.get(sku_id, sku_id)
 
 
 # 末尾が単一数値 (径) のみのパターン用 (×セパレータ無し)
 _TRAILING_DIAMETER_RE = re.compile(r"\s+(\d+\.?\d*)\s*$")
+
+# 既知の誤表記 sku_id → 正規 sku_id マッピング
+# ベース sku_id のみ登録。使用区分サフィックス (_板継用 等) は別途付与されるため不要。
+_SKU_ALIASES: dict[str, str] = {
+    "DW309MOL_1.2_12.6": "DW309MOL_1.2_12.5",  # 全姿勢用スプール誤表記 (12.6→12.5)
+}
 # × セパレータで径×重量を含むパターン
 _SIZE_RE = re.compile(r"(\d+\.?\d*)\s*[×xX]\s*(\d+\.?\d*)")
 # 重量のみ: "× weight" (径なし) — _format_size_label が "× w" 形式で書くケース
@@ -118,4 +125,5 @@ def parse_inventory_name(raw_name: str):
                 w_str = ""
                 brand_part = s
     brand = normalize_brand(brand_part)
-    return f"{brand}_{d_str}_{w_str}", brand
+    sku_id = f"{brand}_{d_str}_{w_str}"
+    return _SKU_ALIASES.get(sku_id, sku_id), brand

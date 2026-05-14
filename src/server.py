@@ -19,7 +19,10 @@ OUTPUT_DIR = ROOT / "output"
 INPUT_DIR = ROOT / "input"
 STATIC_DIR = ROOT / "static"
 CACHE_JSON = ROOT / "forecast_data.json"  # プロジェクトルートに置く（Renderがoutput/を空で上書きするため）
-UPLOAD_INVENTORY = INPUT_DIR / "uploaded_inventory.xlsx"  # Web アップロード先
+UPLOAD_INVENTORY  = INPUT_DIR / "uploaded_inventory.xlsx"       # Web アップロード先 (_1.xlsx)
+UPLOAD_DATA       = INPUT_DIR / "uploaded_data.xlsx"           # Web アップロード先 (data.xlsx)
+UPLOAD_PLAN       = INPUT_DIR / "uploaded_inventory_plan.xlsx" # Web アップロード先 (_2.xlsx)
+MEETING_SKUS_JSON = OUTPUT_DIR / "meeting_skus.json"           # 溶材会議 SKU リスト
 
 app = FastAPI(title="溶材会議アプリ API")
 
@@ -137,19 +140,58 @@ def latest() -> dict:
 
 
 @app.post("/api/upload")
-async def upload_inventory(file: UploadFile = File(...)) -> dict:
-    """在庫管理表 Excel をアップロードして次回パイプライン実行で使用する."""
+async def upload_file(
+    file: UploadFile = File(...),
+    file_type: str = "inventory",
+) -> dict:
+    """Excel ファイルをアップロードして次回パイプライン実行で使用する.
+
+    file_type: "inventory" (_1.xlsx) | "data" (data.xlsx) | "plan" (_2.xlsx)
+    """
     filename = file.filename or ""
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx ファイルのみ対応しています")
     content = await file.read()
-    if len(content) > 30 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="ファイルサイズ上限 30MB を超えています")
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="ファイルサイズ上限 50MB を超えています")
     if len(content) < 4:
         raise HTTPException(status_code=400, detail="ファイルが空または破損しています")
     INPUT_DIR.mkdir(exist_ok=True)
-    UPLOAD_INVENTORY.write_bytes(content)
-    return {"status": "ok", "filename": filename, "size": len(content)}
+    dest = {
+        "data":      UPLOAD_DATA,
+        "plan":      UPLOAD_PLAN,
+    }.get(file_type, UPLOAD_INVENTORY)
+    dest.write_bytes(content)
+
+    # 発注計画書アップロード時: 含まれる SKU リストを即時抽出して保存
+    if file_type == "plan":
+        try:
+            from src.io_reader import read_planned_orders
+            df = read_planned_orders(str(dest))
+            if len(df) > 0:
+                skus = sorted(df["sku_id"].unique().tolist())
+                OUTPUT_DIR.mkdir(exist_ok=True)
+                MEETING_SKUS_JSON.write_text(
+                    json.dumps(
+                        {"skus": skus, "filename": filename, "count": len(skus)},
+                        ensure_ascii=False,
+                    )
+                )
+        except Exception:
+            pass
+
+    return {"status": "ok", "filename": filename, "size": len(content), "file_type": file_type}
+
+
+@app.get("/api/meeting-skus")
+def meeting_skus() -> dict:
+    """溶材会議用 SKU リスト（最後にアップロードされた発注計画書から）."""
+    if not MEETING_SKUS_JSON.exists():
+        return {"skus": [], "filename": None, "count": 0}
+    try:
+        return json.loads(MEETING_SKUS_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return {"skus": [], "filename": None, "count": 0}
 
 
 @app.post("/api/run")
