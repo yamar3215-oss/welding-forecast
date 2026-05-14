@@ -1,6 +1,7 @@
 """FastAPI サーバ: 予測パイプライン実行 + 結果取得 + 静的配信."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "output"
 INPUT_DIR = ROOT / "input"
 STATIC_DIR = ROOT / "static"
+CACHE_JSON = OUTPUT_DIR / "forecast_data.json"
 
 app = FastAPI(title="溶材会議アプリ API")
 
@@ -45,6 +47,8 @@ def _run_pipeline_bg() -> None:
                 _state["error"] = f"exit {proc.returncode}: {tail}"
             else:
                 _state["error"] = None
+                # パイプライン成功後、JSONキャッシュを更新
+                _refresh_cache()
     except subprocess.TimeoutExpired:
         with _lock:
             _state["error"] = "パイプライン実行が10分を超えました"
@@ -56,24 +60,28 @@ def _run_pipeline_bg() -> None:
             _state["running"] = False
 
 
-def _latest_res() -> Path:
-    files = sorted(OUTPUT_DIR.glob("*_RES.xlsx"))
-    if not files:
-        raise HTTPException(
-            status_code=404,
-            detail="RES.xlsx が見つかりません。先に /api/run を実行してください。",
-        )
-    return files[-1]
+def _refresh_cache() -> None:
+    """RES.xlsx → forecast_data.json を再生成して保存."""
+    xlsx_files = sorted(OUTPUT_DIR.glob("*_RES.xlsx"))
+    if not xlsx_files:
+        return
+    actual = next(iter(INPUT_DIR.glob("*在庫評価追加_1.xlsx")), None)
+    log_p = OUTPUT_DIR / "実行ログ.txt"
+    try:
+        data = convert_to_dict(xlsx_files[-1], actual, log_p if log_p.exists() else None)
+        CACHE_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
-def _actual_path() -> Path | None:
-    candidates = list(INPUT_DIR.glob("*在庫評価追加_1.xlsx"))
-    return candidates[0] if candidates else None
-
-
-def _log_path() -> Path | None:
-    p = OUTPUT_DIR / "実行ログ.txt"
-    return p if p.exists() else None
+def _load_cache() -> dict | None:
+    """forecast_data.json を読み込む。存在しなければ None。"""
+    if not CACHE_JSON.exists():
+        return None
+    try:
+        return json.loads(CACHE_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 @app.get("/api/health")
@@ -83,13 +91,13 @@ def health() -> dict:
 
 @app.get("/api/debug")
 def debug() -> dict:
-    import os
     try:
         files = list(OUTPUT_DIR.iterdir()) if OUTPUT_DIR.exists() else []
         return {
             "root": str(ROOT),
             "output_dir": str(OUTPUT_DIR),
             "output_exists": OUTPUT_DIR.exists(),
+            "cache_json_exists": CACHE_JSON.exists(),
             "files": [{"name": f.name, "size": f.stat().st_size} for f in files],
             "cwd": os.getcwd(),
         }
@@ -105,8 +113,26 @@ def status() -> dict:
 
 @app.get("/api/latest")
 def latest() -> dict:
-    res = _latest_res()
-    return convert_to_dict(res, _actual_path(), _log_path())
+    # 1. JSONキャッシュがあれば即返す（Render再起動後も高速）
+    data = _load_cache()
+    if data is not None:
+        return data
+    # 2. なければ RES.xlsx から変換（ローカル初回・パイプライン直後）
+    xlsx_files = sorted(OUTPUT_DIR.glob("*_RES.xlsx"))
+    if not xlsx_files:
+        raise HTTPException(
+            status_code=404,
+            detail="予測データがありません。先に予測を実行してください。",
+        )
+    actual = next(iter(INPUT_DIR.glob("*在庫評価追加_1.xlsx")), None)
+    log_p = OUTPUT_DIR / "実行ログ.txt"
+    data = convert_to_dict(xlsx_files[-1], actual, log_p if log_p.exists() else None)
+    # 次回以降のためにキャッシュ保存
+    try:
+        CACHE_JSON.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return data
 
 
 @app.post("/api/run")
