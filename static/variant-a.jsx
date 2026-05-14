@@ -1,4 +1,4 @@
-/* 溶材会議アプリ — 在庫ダッシュボード v4
+/* 溶材会議アプリ — 在庫ダッシュボード v5
    外部DB不要: 全データは window.FORECAST_DATA を参照。Supabase等は不使用。 */
 
 const useCallback = React.useCallback;
@@ -31,6 +31,23 @@ function barColor(days, dT, cT) {
   return '#22c55e';
 }
 
+// ──── MAPE色分けヘルパー（全体で統一）────
+// <30%: 緑（良好）/ 30-49%: 橙（注意）/ ≥50%: 赤（要注意）
+function mapeColor(pct) {
+  if (pct == null) return '#94a3b8';
+  if (pct < 30) return '#15803d';
+  if (pct < 50) return '#b45309';
+  return '#dc2626';
+}
+function mapeBg(pct) {
+  if (pct == null || pct < 30) return 'transparent';
+  if (pct < 50) return '#fefce8';
+  return '#fef2f2';
+}
+function fmtMape(pct) {
+  return pct == null ? '—' : `${Math.round(pct)}%`;
+}
+
 const STATUS_RANK = { risk: 0, caution: 1, safe: 2, excess: 3 };
 const ST = {
   risk:    { label: '危険', bg: '#fee2e2', color: '#dc2626', dot: '#ef4444' },
@@ -46,8 +63,6 @@ const ORD_STYLE = {
 };
 
 // ──── 95%信頼区間 ────
-// sigma_monthly = min(0.15, MAPE/400) として月次不確実性を推定
-// CI半幅 = 1.96 * sigma * sqrt(i+1) * forecast[i]、最大50%でキャップ
 function computeCI(fcArr, mape_pct) {
   const sigma = Math.min(0.15, (mape_pct || 20) / 400);
   return fcArr.map((fc, i) => {
@@ -86,7 +101,7 @@ function enrichShips(ships, periodStart, periodEnd) {
   ));
 }
 
-// ──── X軸マッパー（月数値ベースの線形補間） ────
+// ──── X軸マッパー ────
 function makeXMapper(allYms, PL, iW) {
   if (!allYms || allYms.length < 2) return () => PL;
   const n0 = ymNum(allYms[0]);
@@ -105,18 +120,14 @@ function ShipTimeline({ ships, allYms, PL, PR }) {
   const start = allYms[0], end = allYms[allYms.length - 1];
   const visible = enrichShips(ships, start, end);
   if (!visible.length) return null;
-
   const vessels = [...new Set(visible.map(s => s.vessel))];
   const svgH = vessels.length * (ROW_H + GAP) + 8;
-
   return (
     <div style={{ marginTop: 6 }}>
       <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600,
         textTransform: 'uppercase', letterSpacing: '.06em', marginLeft: PL + 4, marginBottom: 2 }}>
         建造スケジュール &nbsp;
-        <span style={{ fontStyle: 'italic', fontWeight: 400 }}>
-          着工（破線）→ 建造開始（●）
-        </span>
+        <span style={{ fontStyle: 'italic', fontWeight: 400 }}>着工（破線）→ 建造開始（●）</span>
       </div>
       <svg viewBox={`0 0 ${W} ${svgH}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
         <line x1={PL} y1={0} x2={PL} y2={svgH} stroke="#e2e8f0" strokeWidth={1}/>
@@ -143,9 +154,7 @@ function ShipTimeline({ ships, allYms, PL, PR }) {
                       stroke={col2} strokeWidth={1.5} strokeOpacity={0.75}/>
                     <circle cx={c2} cy={y + ROW_H / 2} r={2.5} fill={col2} opacity={0.75}/>
                     {bw > 32 && (
-                      <text x={c1 + 3} y={y + ROW_H - 3} fontSize={7} fill={col2} opacity={0.8}>
-                        {ship.id}
-                      </text>
+                      <text x={c1 + 3} y={y + ROW_H - 3} fontSize={7} fill={col2} opacity={0.8}>{ship.id}</text>
                     )}
                   </g>
                 );
@@ -172,48 +181,37 @@ function CINote({ fcVal0, ci0, ciLast }) {
   );
 }
 
-// ──── 集計予測グラフ（実績+予測+CI+建造スケジュール） ────
+// ──── 集計予測グラフ ────
 function ForecastChart({ series, months, skus, mape_pct, ships }) {
   const W = 900, H = 210, PL = 68, PR = 20, PT = 22, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
-
   const fcPts = useMemo(() => (months || []).map((ym, i) => ({
     ym, val: (skus || []).reduce((s, sk) => s + (sk.monthly_forecast?.[i] || 0), 0),
   })), [months, skus]);
-
   const acPts = useMemo(() =>
     (series || []).filter(s => s.actual != null).map(s => ({ ym: s.ym, val: s.actual })),
     [series]);
-
   const ci = useMemo(() => computeCI(fcPts.map(p => p.val), mape_pct), [fcPts, mape_pct]);
-
   const allYms = useMemo(() =>
     [...new Set([...acPts.map(p => p.ym), ...fcPts.map(p => p.ym)])].sort(),
     [acPts, fcPts]);
-
   const maxV = useMemo(() => {
     const all = [...fcPts.map(p => p.val), ...acPts.map(p => p.val), ...ci.map(c => c.upper)];
     return Math.max(...all, 1);
   }, [fcPts, acPts, ci]);
-
   if (!allYms.length || allYms.length < 2) return null;
-
   const sx = makeXMapper(allYms, PL, iW);
   const sy = (v) => PT + (1 - Math.min(Math.max(v, 0), maxV) / maxV) * iH;
   const fmtK = (v) => v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v/1e3)}K` : `${Math.round(v)}`;
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map(t => ({ v: t * maxV, y: PT + (1 - t) * iH }));
-
   const fcPoly = fcPts.map(p => `${sx(p.ym)},${sy(p.val)}`).join(' ');
   const acPoly = acPts.length > 1 ? acPts.map(p => `${sx(p.ym)},${sy(p.val)}`).join(' ') : '';
-
   const upperPts = fcPts.map((p, i) => [sx(p.ym), sy(ci[i].upper)]);
   const lowerPts = fcPts.map((p, i) => [sx(p.ym), sy(ci[i].lower)]).reverse();
   const ciPoly = [...upperPts, ...lowerPts].map(([x, y]) => `${x},${y}`).join(' ');
-
   const activeShips = enrichShips(ships, allYms[0], allYms[allYms.length - 1]);
   const hasActual = acPoly.length > 0;
   const legX = PL;
-
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
@@ -223,23 +221,17 @@ function ForecastChart({ series, months, skus, mape_pct, ships }) {
             <text x={PL - 6} y={t.y + 4} textAnchor="end" fontSize={10} fill="#94a3b8">{fmtK(t.v)}</text>
           </g>
         ))}
-
-        {/* 建造スケジュールのバンド（メインチャート内） */}
         {activeShips.map(ship => {
           const c1 = sx(ship.constructYM < allYms[0] ? allYms[0] : ship.constructYM);
           const c2 = sx(ship.loadYM > allYms[allYms.length-1] ? allYms[allYms.length-1] : ship.loadYM);
           const col = vColor(ship.vessel);
           return (
             <g key={ship.id}>
-              <rect x={c1} y={PT} width={Math.max(1, c2 - c1)} height={iH}
-                fill={col} fillOpacity={0.035} stroke="none"/>
-              <line x1={c2} y1={PT} x2={c2} y2={PT + iH}
-                stroke={col} strokeWidth={1} strokeOpacity={0.3} strokeDasharray="3 3"/>
+              <rect x={c1} y={PT} width={Math.max(1, c2 - c1)} height={iH} fill={col} fillOpacity={0.035} stroke="none"/>
+              <line x1={c2} y1={PT} x2={c2} y2={PT + iH} stroke={col} strokeWidth={1} strokeOpacity={0.3} strokeDasharray="3 3"/>
             </g>
           );
         })}
-
-        {/* 95% CI シェーディング */}
         {fcPts.length > 1 && (
           <>
             <polygon points={ciPoly} fill="#0ea5e9" fillOpacity={0.11} stroke="none"/>
@@ -249,16 +241,12 @@ function ForecastChart({ series, months, skus, mape_pct, ships }) {
               fill="none" stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.35} strokeDasharray="3 2"/>
           </>
         )}
-
-        {/* 実績ライン */}
         {hasActual && (
           <>
             <polyline points={acPoly} fill="none" stroke="#64748b" strokeWidth={2} strokeDasharray="5 2"/>
             {acPts.map((p, i) => <circle key={i} cx={sx(p.ym)} cy={sy(p.val)} r={3} fill="#64748b"/>)}
           </>
         )}
-
-        {/* 予測エリア + ライン */}
         {fcPts.length > 1 && (
           <>
             <polygon points={`${sx(fcPts[0].ym)},${PT+iH} ${fcPoly} ${sx(fcPts[fcPts.length-1].ym)},${PT+iH}`}
@@ -267,18 +255,13 @@ function ForecastChart({ series, months, skus, mape_pct, ships }) {
             {fcPts.map((p, i) => <circle key={i} cx={sx(p.ym)} cy={sy(p.val)} r={3.5} fill="#0ea5e9"/>)}
           </>
         )}
-
-        {/* X軸ラベル */}
         {allYms.filter((_, i) => i % 2 === 0 || i === allYms.length - 1).map(ym => (
           <text key={ym} x={sx(ym)} y={H - 6} textAnchor="middle" fontSize={9} fill="#94a3b8">
             {ym.replace('-', '/')}
           </text>
         ))}
-
         <line x1={PL} y1={PT} x2={PL} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
         <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
-
-        {/* 凡例 */}
         <circle cx={legX + 10} cy={PT - 7} r={3.5} fill="#0ea5e9"/>
         <text x={legX + 16} y={PT - 4} fontSize={9} fill="#475569">予測</text>
         {hasActual && (
@@ -291,9 +274,7 @@ function ForecastChart({ series, months, skus, mape_pct, ships }) {
           fill="#0ea5e9" fillOpacity={0.2} stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.5} rx={1}/>
         <text x={hasActual?legX+110:legX+60} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
       </svg>
-
       <ShipTimeline ships={ships} allYms={allYms} PL={PL} PR={PR}/>
-
       {fcPts.length > 0 && ci.length > 0 && (
         <CINote fcVal0={fcPts[0].val} ci0={ci[0]} ciLast={ci[ci.length - 1]}/>
       )}
@@ -301,37 +282,29 @@ function ForecastChart({ series, months, skus, mape_pct, ships }) {
   );
 }
 
-// ──── 個別銘柄予測グラフ（予測消費量+予測在庫+CI+建造スケジュール） ────
+// ──── 個別銘柄予測グラフ ────
 function SkuForecastChart({ material, months, mape_pct, ships }) {
   const W = 900, H = 210, PL = 68, PR = 20, PT = 22, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
-
   const fcArr = material.monthlyForecastArr || [];
   const stArr = material.monthlyStockArr || [];
   const ci = useMemo(() => computeCI(fcArr, mape_pct), [material, mape_pct]);
-
   const maxV = useMemo(() => {
     const all = [...fcArr, ...stArr.filter(v => v != null), ...ci.map(c => c.upper)];
     return Math.max(...all, 1);
   }, [fcArr, stArr, ci]);
-
   if (!months || months.length < 2) return null;
-
   const sx = makeXMapper(months, PL, iW);
   const sy = (v) => PT + (1 - Math.min(Math.max(v, 0), maxV) / maxV) * iH;
   const fmtK = (v) => v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v/1e3)}K` : `${Math.round(v)}`;
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map(t => ({ v: t * maxV, y: PT + (1 - t) * iH }));
-
   const fcPoly = fcArr.map((v, i) => `${sx(months[i])},${sy(v)}`).join(' ');
   const stPts = stArr.map((v, i) => v != null ? [sx(months[i]), sy(v)] : null).filter(Boolean);
   const stPoly = stPts.map(([x, y]) => `${x},${y}`).join(' ');
-
   const upperPts = fcArr.map((_, i) => [sx(months[i]), sy(ci[i].upper)]);
   const lowerPts = fcArr.map((_, i) => [sx(months[i]), sy(ci[i].lower)]).reverse();
   const ciPoly = [...upperPts, ...lowerPts].map(([x, y]) => `${x},${y}`).join(' ');
-
   const activeShips = enrichShips(ships, months[0], months[months.length - 1]);
-
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
@@ -341,23 +314,17 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
             <text x={PL - 6} y={t.y + 4} textAnchor="end" fontSize={10} fill="#94a3b8">{fmtK(t.v)}</text>
           </g>
         ))}
-
-        {/* 建造スケジュールバンド */}
         {activeShips.map(ship => {
           const c1 = sx(ship.constructYM < months[0] ? months[0] : ship.constructYM);
           const c2 = sx(ship.loadYM > months[months.length-1] ? months[months.length-1] : ship.loadYM);
           const col = vColor(ship.vessel);
           return (
             <g key={ship.id}>
-              <rect x={c1} y={PT} width={Math.max(1, c2 - c1)} height={iH}
-                fill={col} fillOpacity={0.035} stroke="none"/>
-              <line x1={c2} y1={PT} x2={c2} y2={PT + iH}
-                stroke={col} strokeWidth={1} strokeOpacity={0.3} strokeDasharray="3 3"/>
+              <rect x={c1} y={PT} width={Math.max(1, c2 - c1)} height={iH} fill={col} fillOpacity={0.035} stroke="none"/>
+              <line x1={c2} y1={PT} x2={c2} y2={PT + iH} stroke={col} strokeWidth={1} strokeOpacity={0.3} strokeDasharray="3 3"/>
             </g>
           );
         })}
-
-        {/* 95% CI */}
         {fcArr.length > 1 && (
           <>
             <polygon points={ciPoly} fill="#0ea5e9" fillOpacity={0.11} stroke="none"/>
@@ -367,16 +334,12 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
               fill="none" stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.35} strokeDasharray="3 2"/>
           </>
         )}
-
-        {/* 予測在庫ライン */}
         {stPoly && stPts.length > 1 && (
           <>
             <polyline points={stPoly} fill="none" stroke="#22c55e" strokeWidth={1.5} strokeDasharray="5 2"/>
             {stPts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={2.5} fill="#22c55e"/>)}
           </>
         )}
-
-        {/* 予測消費量ライン */}
         {fcArr.length > 1 && (
           <>
             <polygon points={`${sx(months[0])},${PT+iH} ${fcPoly} ${sx(months[months.length-1])},${PT+iH}`}
@@ -385,7 +348,6 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
             {fcArr.map((v, i) => <circle key={i} cx={sx(months[i])} cy={sy(v)} r={3.5} fill="#0ea5e9"/>)}
           </>
         )}
-
         {months.filter((_, i) => i % 2 === 0 || i === months.length - 1).map(ym => (
           <text key={ym} x={sx(ym)} y={H - 6} textAnchor="middle" fontSize={9} fill="#94a3b8">
             {ym.replace('-', '/')}
@@ -393,8 +355,6 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
         ))}
         <line x1={PL} y1={PT} x2={PL} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
         <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
-
-        {/* 凡例 */}
         <circle cx={PL+10} cy={PT-7} r={3.5} fill="#0ea5e9"/>
         <text x={PL+16} y={PT-4} fontSize={9} fill="#475569">予測消費量</text>
         <line x1={PL+76} y1={PT-7} x2={PL+88} y2={PT-7} stroke="#22c55e" strokeWidth={1.5} strokeDasharray="4 2"/>
@@ -403,9 +363,7 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
           fill="#0ea5e9" fillOpacity={0.2} stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.5} rx={1}/>
         <text x={PL+152} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
       </svg>
-
       <ShipTimeline ships={ships} allYms={months} PL={PL} PR={PR}/>
-
       {fcArr.length > 0 && ci.length > 0 && (
         <CINote fcVal0={fcArr[0]} ci0={ci[0]} ciLast={ci[ci.length - 1]}/>
       )}
@@ -414,18 +372,37 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
 }
 
 // ──── ソート可能テーブルヘッダー ────
-// top: 50 はページ固定ヘッダー（約48px）の下に追従させるため
-function ThSort({ label, sortKey, curKey, curDir, onClick }) {
+// top: 50 = ページ固定ヘッダー（約48px）の下に追従
+function ThSort({ label, sortKey, curKey, curDir, onClick, textAlign }) {
   const active = sortKey === curKey;
   return (
     <th onClick={() => onClick(sortKey)} style={{
-      padding: '9px 10px', textAlign: 'left', fontSize: 11, fontWeight: 600,
+      padding: '9px 10px', textAlign: textAlign || 'left', fontSize: 11, fontWeight: 600,
       color: active ? '#0f172a' : '#64748b', cursor: 'pointer', userSelect: 'none',
       whiteSpace: 'nowrap', borderBottom: '2px solid #e2e8f0',
       background: active ? '#f1f5f9' : '#fafafa', position: 'sticky', top: 50, zIndex: 2,
     }}>
       {label} <span style={{ opacity: active ? 1 : 0.4 }}>{active ? (curDir === 'asc' ? '▲' : '▼') : '↕'}</span>
     </th>
+  );
+}
+
+// ──── MAPE バッジ（テーブル行内表示用） ────
+function MapeBadge({ pct }) {
+  if (pct == null) return <span style={{ color: '#94a3b8', fontSize: 11 }}>—</span>;
+  const col = mapeColor(pct);
+  const bg = mapeBg(pct);
+  const isHigh = pct >= 50;
+  return (
+    <span style={{
+      display: 'inline-block', fontWeight: isHigh ? 700 : 600, fontSize: 11,
+      color: col, background: bg,
+      borderRadius: 5, padding: isHigh ? '2px 7px' : '2px 4px',
+      border: isHigh ? `1px solid ${col}30` : 'none',
+    }}>
+      {Math.round(pct)}%
+      {isHigh && <span style={{ fontSize: 9, marginLeft: 3 }}>⚠</span>}
+    </span>
   );
 }
 
@@ -436,9 +413,11 @@ function VariantA() {
   const summary = fd.summary || {};
   const rawSkus = fd.skus || [];
   const series = fd.series || [];
-  const mape_pct = summary.mape_constrained || 20;
+  const globalMape = summary.mape_constrained || 20;
 
-  const [fMonths, setFMonths] = useState(3);
+  // ── 状態 ──
+  const [fMonths, setFMonths] = useState(3);       // グラフ表示月数
+  const [orderMonths, setOrderMonths] = useState(3); // 推奨発注計算月数（1〜6）
   const [dangerT, setDangerT] = useState(15);
   const [cautionT, setCautionT] = useState(35);
   const [orderStatus, setOrderStatus] = useState({});
@@ -457,11 +436,13 @@ function VariantA() {
   const isMobile = width < 768;
   const isTablet = width < 1024;
 
+  // ── 派生データ ──
   const enriched = useMemo(() => MATERIALS.map(m => {
     const status = computeStatus(m, dangerT, cautionT);
-    const orderSum = Math.round((m.monthlyOrderArr || []).slice(0, fMonths).reduce((s, v) => s + (v || 0), 0));
+    // orderMonths で推奨発注量を計算（fMonths とは独立）
+    const orderSum = Math.round((m.monthlyOrderArr || []).slice(0, orderMonths).reduce((s, v) => s + (v || 0), 0));
     return { ...m, status, statusRank: STATUS_RANK[status], orderSum };
-  }), [dangerT, cautionT, fMonths]);
+  }), [dangerT, cautionT, orderMonths]);
 
   const urgentCount = useMemo(() => enriched.filter(s => s.status === 'risk').length, [enriched]);
   const cautionCount = useMemo(() => enriched.filter(s => s.status === 'caution').length, [enriched]);
@@ -470,10 +451,8 @@ function VariantA() {
     selectedSku ? enriched.find(m => m.sku === selectedSku) : null,
     [selectedSku, enriched]);
 
-  // 個別銘柄MAPE（ホールドアウト検証で算出済みの実MAPE）
   const skuMape = selectedMaterial ? selectedMaterial.mapePct : null;
 
-  // MAPEが未算出のSKU向けフォールバック：変動係数（参考指標）
   const skuCV = useMemo(() => {
     if (!selectedMaterial || skuMape != null) return null;
     const arr = (selectedMaterial.monthlyForecastArr || []).filter(v => v > 0);
@@ -483,14 +462,6 @@ function VariantA() {
     const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
     return Math.round(Math.sqrt(variance) / mean * 100);
   }, [selectedMaterial, skuMape]);
-
-  // 稼働銘柄のみのMAPE（非稼働SKUを除いた真の予測精度）
-  const activeMape = useMemo(() => {
-    if (inactiveSku.size === 0) return null;
-    const active = enriched.filter(m => !inactiveSku.has(m.sku) && m.mapePct != null);
-    if (!active.length) return null;
-    return Math.round(active.reduce((s, m) => s + m.mapePct, 0) / active.length);
-  }, [enriched, inactiveSku]);
 
   const displayed = useMemo(() => {
     let list = filter === 'urgent'
@@ -506,6 +477,17 @@ function VariantA() {
     return list;
   }, [enriched, filter, sortKey, sortDir]);
 
+  // 表示中の稼働銘柄のみのMAPE（フィルター + 非稼働除外 に連動）
+  const displayedMape = useMemo(() => {
+    const active = displayed.filter(m => !inactiveSku.has(m.sku) && m.mapePct != null);
+    if (!active.length) return null;
+    return Math.round(active.reduce((s, m) => s + m.mapePct, 0) / active.length);
+  }, [displayed, inactiveSku]);
+
+  const inactiveCount = inactiveSku.size;
+  const activeCountInDisplayed = displayed.filter(m => !inactiveSku.has(m.sku)).length;
+
+  // ── ハンドラ ──
   const handleSort = useCallback((key) => {
     setSortKey(prev => {
       if (prev === key) { setSortDir(d => d === 'asc' ? 'desc' : 'asc'); return prev; }
@@ -567,45 +549,37 @@ function VariantA() {
   const thProps = { curKey: sortKey, curDir: sortDir, onClick: handleSort };
   const mDate = (typeof fmtYM === 'function' && typeof MEETING_DATE !== 'undefined') ? fmtYM(MEETING_DATE) : '—';
 
-  // MAPEの色分け（低いほど良い）
-  const mapeColor = (pct) => {
-    if (pct == null) return '#94a3b8';
-    if (pct < 30) return '#15803d';
-    if (pct < 60) return '#b45309';
-    return '#dc2626';
-  };
+  // ── MAPE KPIカードの動的ラベル・値（フィルター + 非稼働に連動） ──
+  const mapeKpiLabel = filter === 'urgent'
+    ? `要対応MAPE（${displayed.length}銘柄）`
+    : inactiveCount > 0
+      ? `稼働MAPE（真の予測精度）`
+      : '予測精度 (MAPE)';
+  const mapeKpiValue = fmtMape(displayedMape);
+  const mapeKpiUnit = filter === 'urgent'
+    ? `要対応銘柄の平均 ／ 全体: ${fmtMape(globalMape)}`
+    : inactiveCount > 0
+      ? `稼働${activeCountInDisplayed}銘柄 ／ 非稼働${inactiveCount}銘柄除外`
+      : `全${enriched.length}銘柄の平均`;
+  const mapeKpiColor = mapeColor(displayedMape);
 
-  // KPIカードデータ
-  const inactiveCount = inactiveSku.size;
-  const activeCount = enriched.length - inactiveCount;
+  // ── KPIカードデータ ──
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
-    { label: `推奨発注量（${fMonths}か月）`, value: fmt(selectedMaterial.orderSum) + ' kg', unit: `全体MAPE参考: ${mape_pct}%`, color: '#0f172a' },
+    { label: `推奨発注量（${orderMonths}か月）`, value: fmt(selectedMaterial.orderSum) + ' kg', unit: `MAPE参考: ${fmtMape(displayedMape)}`, color: '#0f172a' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
-    {
-      label: inactiveCount > 0 ? `稼働MAPE（真の予測精度）` : '予測精度（MAPE）',
-      value: inactiveCount > 0
-        ? (activeMape != null ? activeMape + '%' : '—')
-        : (summary.mape_constrained != null ? summary.mape_constrained + '%' : '—'),
-      unit: inactiveCount > 0
-        ? `稼働${activeCount}銘柄 ／ 非稼働${inactiveCount}銘柄除外`
-        : '数値が低いほど精度が高い',
-      color: inactiveCount > 0
-        ? mapeColor(activeMape)
-        : (summary.mape_constrained != null && summary.mape_constrained < 80 ? '#15803d' : '#b45309'),
-    },
+    { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
     { label: '要対応', value: `${urgentCount + cautionCount}件`, unit: `危険 ${urgentCount}件 ／ 注意 ${cautionCount}件`, color: urgentCount > 0 ? '#dc2626' : cautionCount > 0 ? '#b45309' : '#15803d' },
   ];
 
-  // KPIグリッド列数（レスポンシブ）
   const kpiCols = isMobile ? '1fr' : isTablet ? 'repeat(2,1fr)' : 'repeat(3,1fr)';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#f1f5f9' }}>
 
-      {/* ヘッダー（ページ上部に固定） */}
+      {/* ── ヘッダー（ページ上部に固定） ── */}
       <header style={{
         background: '#0f172a', color: '#fff', padding: '10px 20px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -613,7 +587,6 @@ function VariantA() {
         position: 'sticky', top: 0, zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {/* ハンバーガーメニュー（モバイルのみ） */}
           {isMobile && (
             <button onClick={() => setSidebarOpen(s => !s)} style={{
               background: 'rgba(255,255,255,.15)', color: '#fff', border: 'none',
@@ -625,17 +598,12 @@ function VariantA() {
             <button onClick={() => setSelectedSku(null)} style={{
               background: 'rgba(255,255,255,.1)', color: '#93c5fd',
               border: '1px solid rgba(255,255,255,.2)',
-              borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600,
-              minHeight: 44,
-            }}>
-              ← 全体に戻る
-            </button>
+              borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600, minHeight: 44,
+            }}>← 全体に戻る</button>
           )}
           <div style={{ fontSize: isMobile ? 14 : 18, fontWeight: 700 }}>🔧 在庫ダッシュボード</div>
           {selectedMaterial && !isMobile && (
-            <div style={{ fontSize: 13, color: '#7dd3fc', fontWeight: 600 }}>
-              › {selectedMaterial.code}
-            </div>
+            <div style={{ fontSize: 13, color: '#7dd3fc', fontWeight: 600 }}>› {selectedMaterial.code}</div>
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -644,8 +612,8 @@ function VariantA() {
           )}
           <label style={{
             background: uploading ? '#334155' : '#059669', color: '#fff',
-            borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 13,
-            cursor: uploading ? 'not-allowed' : 'pointer', display: 'inline-block',
+            borderRadius: 8, padding: '0 14px', fontWeight: 700, fontSize: 13,
+            cursor: uploading ? 'not-allowed' : 'pointer',
             userSelect: 'none', minHeight: 44, display: 'flex', alignItems: 'center',
           }}>
             <input type="file" accept=".xlsx" onChange={handleUploadFile}
@@ -654,7 +622,7 @@ function VariantA() {
           </label>
           <button onClick={handleRerun} disabled={running} style={{
             background: running ? '#334155' : '#0ea5e9', color: '#fff', border: 'none',
-            borderRadius: 8, padding: '8px 18px', fontWeight: 700, fontSize: 13,
+            borderRadius: 8, padding: '0 18px', fontWeight: 700, fontSize: 13,
             cursor: running ? 'not-allowed' : 'pointer', minHeight: 44,
           }}>
             {running ? '計算中…' : (isMobile ? '▶ 再実行' : '▶ 予測を再実行')}
@@ -663,7 +631,7 @@ function VariantA() {
       </header>
 
       {runMsg && (
-        <div style={{ background: '#eff6ff', padding: '6px 20px', fontSize: 12, color: '#1d4ed8', borderBottom: '1px solid #bfdbfe', flexShrink: 0 }}>
+        <div style={{ background: '#eff6ff', padding: '6px 20px', fontSize: 12, color: '#1d4ed8', borderBottom: '1px solid #bfdbfe' }}>
           {runMsg}
         </div>
       )}
@@ -672,7 +640,7 @@ function VariantA() {
           background: uploadMsg.startsWith('エラー') ? '#fee2e2' : '#f0fdf4',
           padding: '6px 20px', fontSize: 12,
           color: uploadMsg.startsWith('エラー') ? '#dc2626' : '#15803d',
-          borderBottom: '1px solid #bbf7d0', flexShrink: 0,
+          borderBottom: '1px solid #bbf7d0',
           display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ flex: 1 }}>{uploadMsg}</span>
           <button onClick={() => setUploadMsg('')} style={{
@@ -681,46 +649,59 @@ function VariantA() {
         </div>
       )}
 
+      {/* ── 情報バー（フィルター連動MAPEを表示） ── */}
       <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0',
         padding: '5px 20px', fontSize: 11, color: '#64748b',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         flexWrap: 'wrap', gap: 4 }}>
         <span>予測期間 {fd.period_start} 〜 {fd.period_end} ／ 生成: {fd.generated_at}</span>
-        <span style={{ fontWeight: 600, color: '#334155' }}>
-          総予測 {fmt(summary.total_forecast_kg)} kg ｜ MAPE {summary.mape_constrained != null ? summary.mape_constrained + '%' : '—'} ｜ 警告 {summary.warnings ?? '—'} 件
+        <span style={{ fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>総予測 {fmt(summary.total_forecast_kg)} kg</span>
+          <span>｜</span>
+          <span>
+            {filter === 'urgent' ? '要対応MAPE' : inactiveCount > 0 ? '稼働MAPE' : 'MAPE'}
+            <span style={{
+              marginLeft: 4, fontWeight: 700,
+              color: mapeColor(displayedMape),
+              background: displayedMape != null && displayedMape >= 50 ? '#fee2e2' : 'transparent',
+              borderRadius: 4, padding: displayedMape != null && displayedMape >= 50 ? '0 4px' : 0,
+            }}>
+              {fmtMape(displayedMape)}
+            </span>
+            {filter !== 'all' && (
+              <span style={{ color: '#94a3b8', fontWeight: 400, marginLeft: 4 }}>
+                （全体: {fmtMape(globalMape)}）
+              </span>
+            )}
+          </span>
+          <span>｜ 警告 {summary.warnings ?? '—'} 件</span>
           {inactiveCount > 0 && (
-            <span style={{ color: '#94a3b8', marginLeft: 8 }}>（非稼働{inactiveCount}銘柄除外）</span>
+            <span style={{ color: '#94a3b8', fontWeight: 400 }}>／ 非稼働{inactiveCount}銘柄除外</span>
           )}
         </span>
       </div>
 
       <div style={{ display: 'flex', flex: 1 }}>
 
-        {/* モバイル時のバックドロップ */}
+        {/* モバイル バックドロップ */}
         {isMobile && sidebarOpen && (
-          <div
-            onClick={() => setSidebarOpen(false)}
-            style={{
-              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
-              zIndex: 150,
-            }}
-          />
+          <div onClick={() => setSidebarOpen(false)} style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 150,
+          }}/>
         )}
 
-        {/* サイドバー */}
+        {/* ── サイドバー ── */}
         <aside style={{
-          width: 210, flexShrink: 0, background: '#fff', borderRight: '1px solid #e2e8f0',
-          padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: 20,
+          width: 220, flexShrink: 0, background: '#fff', borderRight: '1px solid #e2e8f0',
+          padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: 18,
           overflowY: 'auto',
           ...(isMobile ? {
-            position: 'fixed', top: 0, bottom: 0, left: sidebarOpen ? 0 : -220,
+            position: 'fixed', top: 0, bottom: 0, left: sidebarOpen ? 0 : -230,
             zIndex: 200, transition: 'left 0.22s ease', boxShadow: sidebarOpen ? '4px 0 20px rgba(0,0,0,0.2)' : 'none',
           } : {
             position: 'sticky', top: 50, maxHeight: 'calc(100vh - 50px)', alignSelf: 'flex-start',
           }),
         }}>
-
-          {/* モバイル時の閉じるボタン */}
           {isMobile && (
             <button onClick={() => setSidebarOpen(false)} style={{
               alignSelf: 'flex-end', background: '#f1f5f9', border: 'none',
@@ -729,23 +710,49 @@ function VariantA() {
             }}>✕ 閉じる</button>
           )}
 
+          {/* 予測グラフ表示月数 */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>予測表示月数</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>グラフ表示月数</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
               {[1, 3, 6, 12].map(n => (
                 <button key={n} onClick={() => setFMonths(n)} style={{
                   padding: '7px 0', fontSize: 13, fontWeight: 600,
                   background: fMonths === n ? '#0f172a' : '#f1f5f9',
                   color: fMonths === n ? '#fff' : '#475569',
-                  border: 'none', borderRadius: 6, cursor: 'pointer',
-                  minHeight: 40,
+                  border: 'none', borderRadius: 6, cursor: 'pointer', minHeight: 40,
                 }}>{n}か月</button>
               ))}
             </div>
           </div>
 
+          {/* 推奨発注計算期間（スライダー: 1〜6か月） */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>アラート閾値</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>
+              発注計算期間
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <input
+                type="range" min="1" max="6" step="1" value={orderMonths}
+                onChange={e => setOrderMonths(Number(e.target.value))}
+                style={{ flex: 1, accentColor: '#0ea5e9', cursor: 'pointer' }}
+              />
+              <span style={{
+                minWidth: 36, textAlign: 'center', fontSize: 14, fontWeight: 700,
+                color: '#0f172a', background: '#f1f5f9', borderRadius: 6,
+                padding: '3px 6px',
+              }}>{orderMonths}か月</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8' }}>
+              <span>1か月</span><span>6か月</span>
+            </div>
+            <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
+              推奨発注量・KPIカードに即時反映
+            </div>
+          </div>
+
+          {/* アラート閾値 */}
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>アラート閾値</div>
             {[
               { label: '危険', color: '#dc2626', val: dangerT, set: setDangerT },
               { label: '注意', color: '#eab308', val: cautionT, set: setCautionT },
@@ -762,8 +769,9 @@ function VariantA() {
             ))}
           </div>
 
+          {/* 絞り込み（フィルター連動MAPE表示） */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>絞り込み</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>絞り込み</div>
             {[
               { key: 'all', label: `全銘柄 (${enriched.length}件)` },
               { key: 'urgent', label: `要対応 (${urgentCount + cautionCount}件)` },
@@ -774,18 +782,30 @@ function VariantA() {
                 fontWeight: filter === key ? 700 : 500,
                 background: filter === key ? '#f1f5f9' : 'transparent',
                 color: filter === key ? '#0f172a' : '#64748b',
-                border: 'none', borderRadius: 6, cursor: 'pointer',
-                minHeight: 40,
+                border: 'none', borderRadius: 6, cursor: 'pointer', minHeight: 40,
               }}>{label}</button>
             ))}
+            {/* フィルター別MAPE速報 */}
+            <div style={{ background: '#f8fafc', borderRadius: 6, padding: '6px 10px', border: '1px solid #e2e8f0', marginTop: 4 }}>
+              <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 2 }}>
+                {filter === 'urgent' ? '要対応銘柄MAPE' : '表示中MAPE'}
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: mapeColor(displayedMape) }}>
+                {fmtMape(displayedMape)}
+              </div>
+              {filter !== 'all' && (
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>全体: {fmtMape(globalMape)}</div>
+              )}
+            </div>
           </div>
 
+          {/* 非稼働銘柄パネル */}
           {inactiveCount > 0 && (
             <div style={{ background: '#fef9c3', borderRadius: 8, padding: '10px 12px', border: '1px solid #fde68a' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: '#a16207', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>非稼働銘柄</div>
               <div style={{ fontSize: 12, color: '#92400e', fontWeight: 600 }}>{inactiveCount}銘柄 除外中</div>
               <div style={{ fontSize: 11, color: '#a16207', marginTop: 2 }}>
-                稼働MAPE: {activeMape != null ? `${activeMape}%` : '—'}
+                稼働MAPE: <b>{fmtMape(displayedMape)}</b>
               </div>
               <button onClick={() => setInactiveSku(new Set())} style={{
                 marginTop: 8, fontSize: 11, padding: '4px 10px', borderRadius: 6,
@@ -795,23 +815,24 @@ function VariantA() {
             </div>
           )}
 
+          {/* 選択中の銘柄パネル */}
           {selectedMaterial && (
             <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '12px', border: '1px solid #bae6fd' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: '#0ea5e9', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>選択中の銘柄</div>
               <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 8 }}>{selectedMaterial.code}</div>
               <div style={{ fontSize: 11, marginBottom: 4 }}>
-                <span style={{ color: '#64748b' }}>個別MAPE: </span>
+                <span style={{ color: '#64748b' }}>MAPE: </span>
                 {skuMape != null ? (
-                  <b style={{ color: mapeColor(skuMape), fontSize: 14 }}>{skuMape}%</b>
+                  <b style={{ color: mapeColor(skuMape), fontSize: 14 }}>{fmtMape(skuMape)}</b>
                 ) : (
                   <span style={{ color: '#94a3b8' }}>—</span>
                 )}
               </div>
               <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>
-                全体MAPE: {mape_pct}%
+                {filter === 'urgent' ? '要対応' : '全体'}MAPE: {fmtMape(displayedMape)}
                 {skuMape != null && (
-                  <span style={{ color: skuMape < mape_pct ? '#15803d' : '#dc2626', marginLeft: 4 }}>
-                    ({skuMape < mape_pct ? '↑良好' : '↓低精度'})
+                  <span style={{ color: skuMape < (displayedMape || globalMape) ? '#15803d' : '#dc2626', marginLeft: 4 }}>
+                    ({skuMape < (displayedMape || globalMape) ? '↑良好' : '↓低精度'})
                   </span>
                 )}
               </div>
@@ -819,22 +840,21 @@ function VariantA() {
                 fontSize: 11, padding: '4px 10px', borderRadius: 6,
                 background: '#fff', border: '1px solid #bae6fd',
                 color: '#0ea5e9', cursor: 'pointer', width: '100%', fontWeight: 600,
-              }}>
-                選択解除
-              </button>
+              }}>選択解除</button>
             </div>
           )}
 
         </aside>
 
+        {/* ── メインコンテンツ ── */}
         <main style={{ flex: 1, padding: isMobile ? 10 : 16, display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
 
-          {/* KPIカード（レスポンシブ） */}
+          {/* KPIカード */}
           <div style={{ display: 'grid', gridTemplateColumns: kpiCols, gap: 12 }}>
             {kpiCards.map(({ label, value, unit, color }) => (
               <div key={label} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '14px 18px' }}>
                 <div style={{ fontSize: 11, color: '#64748b', fontWeight: 500, marginBottom: 6 }}>{label}</div>
-                <div style={{ fontSize: isMobile ? 22 : 30, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
                 <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{unit}</div>
               </div>
             ))}
@@ -849,34 +869,40 @@ function VariantA() {
                     {selectedMaterial.code} — 月次予測（消費量 kg）
                   </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    {skuMape != null ? (
-                      <span style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '3px 10px', fontSize: 12 }}>
-                        個別MAPE:&nbsp;
-                        <b style={{ fontSize: 16, color: mapeColor(skuMape) }}>{skuMape}%</b>
-                        <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>（直近9ヶ月ホールドアウト）</span>
-                      </span>
-                    ) : (
-                      <span style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '3px 10px', fontSize: 12 }}>
-                        個別MAPE: <b style={{ color: '#94a3b8' }}>—</b>
-                        {skuCV != null && <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>変動係数: {skuCV}%</span>}
-                      </span>
-                    )}
-                    <span style={{ fontSize: 11, color: '#94a3b8', padding: '3px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6 }}>
-                      全体MAPE: <b style={{ color: mapeColor(mape_pct) }}>{mape_pct}%</b>
-                      {skuMape != null && mape_pct != null && (
-                        <span style={{ marginLeft: 4, color: skuMape < mape_pct ? '#15803d' : '#dc2626' }}>
-                          {skuMape < mape_pct ? `（全体より${(mape_pct - skuMape).toFixed(1)}pt 良好）` : `（全体より${(skuMape - mape_pct).toFixed(1)}pt 低精度）`}
+                    <span style={{
+                      background: skuMape != null && skuMape >= 50 ? '#fef2f2' : '#f8fafc',
+                      border: `1px solid ${skuMape != null && skuMape >= 50 ? '#fca5a5' : '#e2e8f0'}`,
+                      borderRadius: 6, padding: '4px 10px', fontSize: 12,
+                    }}>
+                      MAPE:&nbsp;
+                      {skuMape != null ? (
+                        <b style={{ fontSize: 16, color: mapeColor(skuMape) }}>{fmtMape(skuMape)}</b>
+                      ) : (
+                        <b style={{ color: '#94a3b8' }}>—</b>
+                      )}
+                      {skuMape == null && skuCV != null && (
+                        <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>変動係数: {skuCV}%</span>
+                      )}
+                      <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>（直近9ヶ月HO）</span>
+                    </span>
+                    <span style={{ fontSize: 11, color: '#94a3b8', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6 }}>
+                      {filter === 'urgent' ? '要対応' : '全体'}MAPE: <b style={{ color: mapeColor(displayedMape) }}>{fmtMape(displayedMape)}</b>
+                      {skuMape != null && displayedMape != null && (
+                        <span style={{ marginLeft: 4, color: skuMape < displayedMape ? '#15803d' : '#dc2626' }}>
+                          {skuMape < displayedMape
+                            ? `（+${(displayedMape - skuMape).toFixed(0)}pt 良好）`
+                            : `（−${(skuMape - displayedMape).toFixed(0)}pt 低精度）`}
                         </span>
                       )}
                     </span>
                   </div>
                 </div>
-                <SkuForecastChart material={selectedMaterial} months={months} mape_pct={mape_pct} ships={SHIPS}/>
+                <SkuForecastChart material={selectedMaterial} months={months} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
               </>
             ) : (
               <>
                 <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', marginBottom: 10 }}>月次予測推移（使用量 kg）</div>
-                <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={mape_pct} ships={SHIPS}/>
+                <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
               </>
             )}
           </div>
@@ -886,7 +912,7 @@ function VariantA() {
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #e2e8f0',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>
-                全材料在庫一覧
+                {filter === 'urgent' ? '要対応銘柄 一覧' : '全材料在庫一覧'}
                 <span style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginLeft: 8 }}>{displayed.length}銘柄</span>
                 {inactiveCount > 0 && (
                   <span style={{ fontSize: 11, color: '#a16207', background: '#fef9c3', borderRadius: 6, padding: '1px 8px', marginLeft: 8, fontWeight: 600 }}>
@@ -895,11 +921,13 @@ function VariantA() {
                 )}
               </div>
               {!isMobile && (
-                <div style={{ fontSize: 11, color: '#94a3b8' }}>「詳細」または材料名クリックで個別グラフ表示 ／ 「稼働」ボタンで MAPE 計算から除外</div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                  「詳細」または材料名クリックで個別グラフ ／ 「稼働」ボタンでMAPE除外 ／ MAPE<span style={{ color: '#b45309' }}>橙</span>≥30% <span style={{ color: '#dc2626' }}>赤</span>≥50%
+                </div>
               )}
             </div>
 
-            {/* overflowY: clip でページスクロール時に th の position:sticky が機能する */}
+            {/* overflowY: clip → th の position:sticky がページヘッダー下に追従 */}
             <div style={{ overflowX: 'auto', overflowY: 'clip' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
@@ -911,10 +939,11 @@ function VariantA() {
                     }}>詳細</th>
                     <ThSort label="状態" sortKey="statusRank" {...thProps}/>
                     <ThSort label="材料名" sortKey="code" {...thProps}/>
-                    <ThSort label="現在庫 (kg)" sortKey="current" {...thProps}/>
+                    <ThSort label="現在庫 (kg)" sortKey="current" textAlign="right" {...thProps}/>
                     <ThSort label="残日数" sortKey="daysLeft" {...thProps}/>
-                    <ThSort label="月間消費 (kg)" sortKey="monthly" {...thProps}/>
-                    <ThSort label={`推奨発注量 (${fMonths}か月・kg)`} sortKey="orderSum" {...thProps}/>
+                    <ThSort label="月間消費 (kg)" sortKey="monthly" textAlign="right" {...thProps}/>
+                    <ThSort label={`発注推奨 (${orderMonths}か月・kg)`} sortKey="orderSum" textAlign="right" {...thProps}/>
+                    <ThSort label="MAPE" sortKey="mapePct" textAlign="center" {...thProps}/>
                     <th style={{
                       padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
                       borderBottom: '2px solid #e2e8f0', background: '#fafafa',
@@ -987,6 +1016,10 @@ function VariantA() {
                         </td>
                         <td style={{ padding: '8px 10px', textAlign: 'right', color: '#334155' }}>{fmt(m.monthly)}</td>
                         <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>{fmt(m.orderSum)}</td>
+                        {/* MAPE列 */}
+                        <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                          <MapeBadge pct={m.mapePct}/>
+                        </td>
                         <td style={{ padding: '8px 10px' }}>
                           <button onClick={() => cycleOrder(m.sku)} style={{
                             padding: '3px 12px', borderRadius: 999, fontSize: 11, fontWeight: 600,
