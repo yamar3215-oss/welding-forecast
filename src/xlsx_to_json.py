@@ -70,16 +70,45 @@ def _scalar(v: Any) -> Any:
     return v
 
 
-def _load_per_sku_mape(res_path: str | Path) -> dict[str, float]:
-    """output/ ディレクトリの per_sku_mape.json を読み込む."""
-    p = Path(res_path).parent / "per_sku_mape.json"
-    if not p.exists():
-        return {}
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def _canonical_sku_id(sku_id: str) -> str:
+    """末尾の空パーツを除去して正規化: 'DW100_1.2_' → 'DW100_1.2'."""
+    parts = sku_id.split("_")
+    while parts and parts[-1] == "":
+        parts.pop()
+    return "_".join(parts)
+
+
+def _load_per_sku_mape(res_path: str | Path) -> tuple[dict[str, float], dict[str, str]]:
+    """output/ の per_sku_mape.json と per_sku_reason.json を読み込む."""
+    base = Path(res_path).parent
+    mape: dict[str, float] = {}
+    reason: dict[str, str] = {}
+    p = base / "per_sku_mape.json"
+    if p.exists():
+        try:
+            with open(p, encoding="utf-8") as f:
+                mape = json.load(f)
+        except Exception:
+            pass
+    p2 = base / "per_sku_reason.json"
+    if p2.exists():
+        try:
+            with open(p2, encoding="utf-8") as f:
+                reason = json.load(f)
+        except Exception:
+            pass
+    return mape, reason
+
+
+def _mape_lookup(sku_id: str, exact: dict, canonical: dict, brand_fallback: dict):
+    """3段階フォールバックで値を引く: 完全一致 → 正規化一致 → ブランド一致."""
+    if sku_id in exact:
+        return exact[sku_id]
+    csid = _canonical_sku_id(sku_id)
+    if csid in canonical:
+        return canonical[csid]
+    brand = sku_id.split("_")[0]
+    return brand_fallback.get(brand)
 
 
 def convert_to_dict(
@@ -88,7 +117,16 @@ def convert_to_dict(
     log_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """RES.xlsx + _1.xlsx + ログ → フロント用 dict."""
-    per_sku_mape = _load_per_sku_mape(res_path)
+    per_sku_mape, per_sku_reason = _load_per_sku_mape(res_path)
+    _canon_mape = {_canonical_sku_id(k): v for k, v in per_sku_mape.items()}
+    _canon_reason = {_canonical_sku_id(k): v for k, v in per_sku_reason.items()}
+    # ブランド部 (first "_" 前) が一意なエントリのみフォールバック索引として使う
+    from collections import Counter as _Counter
+    _brand_cnt = _Counter(k.split("_")[0] for k in per_sku_mape)
+    _brand_mape = {k.split("_")[0]: v for k, v in per_sku_mape.items()
+                   if _brand_cnt[k.split("_")[0]] == 1}
+    _brand_reason = {k.split("_")[0]: v for k, v in per_sku_reason.items()
+                     if _brand_cnt[k.split("_")[0]] == 1}
     res_df = read_forecast_result(str(res_path))
     if len(res_df) == 0:
         raise ValueError(f"RES.xlsx にデータがありません: {res_path}")
@@ -137,7 +175,8 @@ def convert_to_dict(
             "stock_evaluation_yama": None,
             "stock_evaluation_ym": None,
             "current_stock_kg": None,
-            "mape_pct": per_sku_mape.get(str(sku_id)),
+            "mape_pct": _mape_lookup(str(sku_id), per_sku_mape, _canon_mape, _brand_mape),
+            "mape_reason": _mape_lookup(str(sku_id), per_sku_reason, _canon_reason, _brand_reason),
         })
 
     sku_records.sort(key=lambda s: s["total_forecast_12m"], reverse=True)

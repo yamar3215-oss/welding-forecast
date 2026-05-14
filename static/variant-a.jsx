@@ -388,7 +388,15 @@ function ThSort({ label, sortKey, curKey, curDir, onClick, textAlign }) {
 }
 
 // ──── MAPE バッジ（テーブル行内表示用） ────
-function MapeBadge({ pct }) {
+function MapeBadge({ pct, reason }) {
+  if (reason === 'zero_actual') {
+    return (
+      <span style={{ color: '#94a3b8', fontSize: 10, background: '#f1f5f9',
+        padding: '2px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>
+        消費なし
+      </span>
+    );
+  }
   if (pct == null) return <span style={{ color: '#94a3b8', fontSize: 11 }}>—</span>;
   const col = mapeColor(pct);
   const bg = mapeBg(pct);
@@ -1018,7 +1026,7 @@ function VariantA() {
                         <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>{fmt(m.orderSum)}</td>
                         {/* MAPE列 */}
                         <td style={{ padding: '8px 10px', textAlign: 'center' }}>
-                          <MapeBadge pct={m.mapePct}/>
+                          <MapeBadge pct={m.mapePct} reason={m.mapeReason}/>
                         </td>
                         <td style={{ padding: '8px 10px' }}>
                           <button onClick={() => cycleOrder(m.sku)} style={{

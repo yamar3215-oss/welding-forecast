@@ -119,6 +119,7 @@ function buildMaterials(fd) {
       totalOrder12m: s.total_order_12m,
       isStockSynthesized: (s.current_stock_kg == null),
       mapePct: (s.mape_pct != null) ? s.mape_pct : null,
+      mapeReason: s.mape_reason || null,
     };
   });
 }

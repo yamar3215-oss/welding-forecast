@@ -78,15 +78,18 @@ def make_sku_id(brand: str, diameter, unit_weight) -> str:
 _TRAILING_DIAMETER_RE = re.compile(r"\s+(\d+\.?\d*)\s*$")
 # × セパレータで径×重量を含むパターン
 _SIZE_RE = re.compile(r"(\d+\.?\d*)\s*[×xX]\s*(\d+\.?\d*)")
+# 重量のみ: "× weight" (径なし) — _format_size_label が "× w" 形式で書くケース
+_WEIGHT_ONLY_RE = re.compile(r"[×xX]\s*(\d+\.?\d*)\s*$")
 
 
 def parse_inventory_name(raw_name: str):
     """在庫管理表の銘柄表記から sku_id を生成.
 
     優先パターン:
-      1. `銘柄 d×w` (× セパレータあり) → 径と重量を抽出
-      2. `銘柄 d` (末尾に単一数値) → 径のみ抽出、重量は空
-      3. それ以外 → 銘柄のみ、径と重量は空
+      1. `銘柄 d×w` (× セパレータあり・両数値) → 径と重量を抽出
+      2. `銘柄 ×w` (先頭 × のみ・重量のみ) → 重量のみ抽出、径は空
+      3. `銘柄 d` (末尾に単一数値) → 径のみ抽出、重量は空
+      4. それ以外 → 銘柄のみ、径と重量は空
 
     数値は `:g` 形式に正規化 (`4.0` → `4`)。
 
@@ -99,14 +102,20 @@ def parse_inventory_name(raw_name: str):
         w_str = _format_num_str(size_match.group(2))
         brand_part = s[: size_match.start()] + s[size_match.end():]
     else:
-        trail_match = _TRAILING_DIAMETER_RE.search(s)
-        if trail_match:
-            d_str = _format_num_str(trail_match.group(1))
-            w_str = ""
-            brand_part = s[: trail_match.start()]
-        else:
+        weight_match = _WEIGHT_ONLY_RE.search(s)
+        if weight_match:
+            w_str = _format_num_str(weight_match.group(1))
             d_str = ""
-            w_str = ""
-            brand_part = s
+            brand_part = s[: weight_match.start()]
+        else:
+            trail_match = _TRAILING_DIAMETER_RE.search(s)
+            if trail_match:
+                d_str = _format_num_str(trail_match.group(1))
+                w_str = ""
+                brand_part = s[: trail_match.start()]
+            else:
+                d_str = ""
+                w_str = ""
+                brand_part = s
     brand = normalize_brand(brand_part)
     return f"{brand}_{d_str}_{w_str}", brand

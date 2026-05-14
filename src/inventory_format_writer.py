@@ -44,7 +44,9 @@ def _format_size_label(diameter, unit_weight) -> str:
     if d and w:
         return f"{d}× {w}"
     if d:
-        return f"{d}×"
+        return f"{d}"      # 重量なし: 径のみ (× なし → parse_inventory_name が正しく解析)
+    if w:
+        return f"× {w}"   # 径なし・重量あり: "× weight" 形式
     return ""
 
 

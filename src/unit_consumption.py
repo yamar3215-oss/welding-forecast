@@ -137,14 +137,46 @@ def compute_holdout_mape(
     )
     pred = pred.rename(columns={"予測使用量": "予測"})
     actual = holdout_cons.rename(columns={"qty_kg": "実績"})
+
+    pred_skus = set(pred["sku_id"].unique()) if len(pred) > 0 else set()
+
     merged = pred.merge(actual, on=["year_month", "sku_id"], how="inner")
-    merged = merged[merged["実績"] > 0]
-    if len(merged) == 0:
-        return {"mape": float("nan"), "per_sku": pd.DataFrame()}
-    merged["abs_pct_err"] = (merged["予測"] - merged["実績"]).abs() / merged["実績"]
-    per_sku = merged.groupby("sku_id")["abs_pct_err"].mean().reset_index()
+    merged_nonzero = merged[merged["実績"] > 0]
+
+    skus_with_nonzero = set(merged_nonzero["sku_id"].unique())
+    zero_actual_skus = pred_skus - skus_with_nonzero
+    if zero_actual_skus:
+        _logger.info(
+            "ホールドアウト実績ゼロSKU (%d件): %s",
+            len(zero_actual_skus),
+            ", ".join(sorted(zero_actual_skus)[:20]),
+        )
+
+    if len(merged_nonzero) == 0:
+        rows = [{"sku_id": s, "abs_pct_err": float("nan"),
+                 "mape_%": float("nan"), "reason": "zero_actual"}
+                for s in sorted(pred_skus)]
+        return {"mape": float("nan"),
+                "per_sku": pd.DataFrame(rows) if rows else pd.DataFrame()}
+
+    merged_nonzero = merged_nonzero.copy()
+    merged_nonzero["abs_pct_err"] = (
+        (merged_nonzero["予測"] - merged_nonzero["実績"]).abs()
+        / merged_nonzero["実績"]
+    )
+    per_sku = merged_nonzero.groupby("sku_id")["abs_pct_err"].mean().reset_index()
     per_sku["mape_%"] = per_sku["abs_pct_err"] * 100
-    overall = float(merged["abs_pct_err"].mean() * 100)
+    per_sku["reason"] = "ok"
+
+    if zero_actual_skus:
+        zero_rows = pd.DataFrame([
+            {"sku_id": s, "abs_pct_err": float("nan"),
+             "mape_%": float("nan"), "reason": "zero_actual"}
+            for s in sorted(zero_actual_skus)
+        ])
+        per_sku = pd.concat([per_sku, zero_rows], ignore_index=True)
+
+    overall = float(merged_nonzero["abs_pct_err"].mean() * 100)
     return {"mape": overall, "per_sku": per_sku}
 
 

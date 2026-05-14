@@ -170,11 +170,28 @@ def main():
     per_sku_df = holdout_result.get("per_sku", pd.DataFrame())
     if len(per_sku_df) > 0:
         Path(args.output_dir).mkdir(exist_ok=True)
-        per_sku_mape = per_sku_df.set_index("sku_id")["mape_%"].round(1).to_dict()
+        has_reason = "reason" in per_sku_df.columns
+        # 有効MAPE（実績あり）のみ float 保存 (Supabase・後方互換)
+        if has_reason:
+            valid_df = per_sku_df[per_sku_df["reason"] == "ok"]
+        else:
+            valid_df = per_sku_df[per_sku_df["mape_%"].notna()]
+        per_sku_mape = valid_df.set_index("sku_id")["mape_%"].round(1).to_dict()
         per_sku_path = os.path.join(args.output_dir, "per_sku_mape.json")
         with open(per_sku_path, "w", encoding="utf-8") as f:
             json.dump(per_sku_mape, f, ensure_ascii=False, indent=2)
-        log(f"  - 個別MAPE ({len(per_sku_mape)}銘柄): {per_sku_path}")
+        # reason 辞書を別ファイル保存（フロント "消費なし" 表示用）
+        if has_reason:
+            reason_dict = per_sku_df.set_index("sku_id")["reason"].to_dict()
+            reason_path = os.path.join(args.output_dir, "per_sku_reason.json")
+            with open(reason_path, "w", encoding="utf-8") as f:
+                json.dump(reason_dict, f, ensure_ascii=False, indent=2)
+            no_mape = [s for s, r in reason_dict.items() if r != "ok"]
+            if no_mape:
+                log(f"  - 実績ゼロのためMAPE算出不可 ({len(no_mape)}銘柄): "
+                    f"{', '.join(sorted(no_mape)[:10])}"
+                    + (f"…他{len(no_mape) - 10}件" if len(no_mape) > 10 else ""))
+        log(f"  - 個別MAPE ({len(per_sku_mape)}銘柄有効): {per_sku_path}")
 
     # ALS × 2 回分の大きなオブジェクトを即時解放
     del holdout_result, holdout_baseline, per_sku_df
