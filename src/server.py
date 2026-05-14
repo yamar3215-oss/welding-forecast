@@ -81,6 +81,22 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.get("/api/debug")
+def debug() -> dict:
+    import os
+    try:
+        files = list(OUTPUT_DIR.iterdir()) if OUTPUT_DIR.exists() else []
+        return {
+            "root": str(ROOT),
+            "output_dir": str(OUTPUT_DIR),
+            "output_exists": OUTPUT_DIR.exists(),
+            "files": [{"name": f.name, "size": f.stat().st_size} for f in files],
+            "cwd": os.getcwd(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/status")
 def status() -> dict:
     with _lock:
