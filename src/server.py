@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "output"
 INPUT_DIR = ROOT / "input"
 STATIC_DIR = ROOT / "static"
-CACHE_JSON = OUTPUT_DIR / "forecast_data.json"
+CACHE_JSON = ROOT / "forecast_data.json"  # プロジェクトルートに置く（Renderがoutput/を空で上書きするため）
 
 app = FastAPI(title="溶材会議アプリ API")
 
