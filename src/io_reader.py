@@ -4,6 +4,9 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 from openpyxl import load_workbook
 
+# 場所ではなく「使用区分」を表す拠点値
+_USAGE_LOCATIONS = frozenset({"板継用", "全姿勢用"})
+
 
 def _to_date(v):
     """セル値を date に変換 (datetime/date/str いずれも対応)."""
@@ -402,22 +405,32 @@ def read_inventory(path: str) -> pd.DataFrame:
 
     records = []
     last_sku_id = None
+    last_base_sku_id = None
     for r in range(3, len(rows)):
         row = rows[r]
         brand_part1 = row[1] if len(row) > 1 else None
         brand_part2 = row[2] if len(row) > 2 else None
         location = row[3] if len(row) > 3 else None
-        # B/C 列が空 && D 列に拠点がある → 直前銘柄を継承
+        # B/C 列が空 && D 列に拠点がある → 直前銘柄を継承 (または使用区分で新 sku_id)
         if (brand_part1 is None or str(brand_part1).strip() == "") and \
            (brand_part2 is None or str(brand_part2).strip() == ""):
             if location is None or str(location).strip() == "":
                 continue
-            if last_sku_id is None:
+            if last_base_sku_id is None:
                 continue
-            sku_id = last_sku_id
+            loc = str(location).strip()
+            if loc in _USAGE_LOCATIONS:
+                sku_id = f"{last_base_sku_id}_{loc}"
+            else:
+                sku_id = last_sku_id
+            last_sku_id = sku_id
         else:
             combined = f"{brand_part1 or ''} {brand_part2 or ''}".strip()
             sku_id, _brand = parse_inventory_name(combined)
+            last_base_sku_id = sku_id
+            loc = str(location).strip() if location else ""
+            if loc in _USAGE_LOCATIONS:
+                sku_id = f"{sku_id}_{loc}"
             last_sku_id = sku_id
         loc = str(location).strip() if location else ""
         for col_idx, ym in month_cols.items():
@@ -437,6 +450,27 @@ def read_inventory(path: str) -> pd.DataFrame:
                 "拠点": loc,
             })
     return pd.DataFrame(records)
+
+
+def extract_usage_consumption(inventory_df: pd.DataFrame) -> pd.DataFrame:
+    """使用区分別SKUの出庫量を消費量 (qty_kg) として返す.
+
+    在庫管理表の '板継用' / '全姿勢用' 行の出庫データを
+    学習用消費データとして利用するための変換。
+    """
+    if len(inventory_df) == 0:
+        return pd.DataFrame(columns=["year_month", "sku_id", "qty_kg"])
+    # 使用区分サフィックスを持つ行だけ抽出 (非キャプチャグループで警告を抑止)
+    suffix_pat = "|".join(re.escape(u) for u in _USAGE_LOCATIONS)
+    mask = inventory_df["sku_id"].str.contains(
+        f"_(?:{suffix_pat})$", na=False
+    )
+    usage_rows = inventory_df[mask].copy()
+    if len(usage_rows) == 0:
+        return pd.DataFrame(columns=["year_month", "sku_id", "qty_kg"])
+    usage_rows = usage_rows[["year_month", "sku_id", "出庫"]].rename(columns={"出庫": "qty_kg"})
+    usage_rows = usage_rows[usage_rows["qty_kg"].notna() & (usage_rows["qty_kg"] > 0)]
+    return usage_rows.groupby(["year_month", "sku_id"], as_index=False)["qty_kg"].sum()
 
 
 def extract_planned_orders_from_inventory(inventory: pd.DataFrame) -> pd.DataFrame:
@@ -504,6 +538,7 @@ def read_forecast_result(path: str) -> pd.DataFrame:
 
     records = []
     last_sku_id = None
+    last_base_sku_id = None
     for r in range(3, len(rows)):
         row = rows[r]
         brand_part1 = row[1] if len(row) > 1 else None
@@ -513,12 +548,21 @@ def read_forecast_result(path: str) -> pd.DataFrame:
            (brand_part2 is None or str(brand_part2).strip() == ""):
             if location is None or str(location).strip() == "":
                 continue
-            if last_sku_id is None:
+            if last_base_sku_id is None:
                 continue
-            sku_id = last_sku_id
+            loc = str(location).strip()
+            if loc in _USAGE_LOCATIONS:
+                sku_id = f"{last_base_sku_id}_{loc}"
+            else:
+                sku_id = last_sku_id
+            last_sku_id = sku_id
         else:
             combined = f"{brand_part1 or ''} {brand_part2 or ''}".strip()
             sku_id, _brand = parse_inventory_name(combined)
+            last_base_sku_id = sku_id
+            loc = str(location).strip() if location else ""
+            if loc in _USAGE_LOCATIONS:
+                sku_id = f"{sku_id}_{loc}"
             last_sku_id = sku_id
         loc = str(location).strip() if location else ""
         for col_idx, ym in month_cols.items():

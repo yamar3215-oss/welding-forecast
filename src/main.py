@@ -16,6 +16,8 @@ from src.io_reader import (
     read_planned_orders,
     detect_train_end_ym,
     extract_planned_orders_from_inventory,
+    extract_usage_consumption,
+    _USAGE_LOCATIONS,
 )
 from src.unit_consumption import (
     apply_overrides,
@@ -86,6 +88,39 @@ def main():
     log(f"  - 船数: {len(ships)}, 船種: {len(ship_types)}, "
         f"SKU: {len(materials)}, 消費レコード: {len(consumption)}, "
         f"在庫レコード: {len(inventory)}")
+
+    # 使用区分別消費データを在庫管理表の出庫実績から追加
+    usage_cons = extract_usage_consumption(inventory)
+    if len(usage_cons) > 0:
+        # 使用区分別SKUの基本sku_idを特定
+        base_skus: set[str] = set()
+        for sku in usage_cons["sku_id"].unique():
+            for loc in _USAGE_LOCATIONS:
+                if sku.endswith(f"_{loc}"):
+                    base_skus.add(sku[: -(len(loc) + 1)])
+                    break
+        # 基本SKU材料行から派生エントリを materials に追加
+        extra_mats = []
+        for sku in usage_cons["sku_id"].unique():
+            for base_sku in base_skus:
+                if sku.startswith(f"{base_sku}_"):
+                    hits = materials[materials["sku_id"] == base_sku]
+                    if len(hits) > 0:
+                        row = hits.iloc[0].to_dict()
+                        row["sku_id"] = sku
+                        extra_mats.append(row)
+        if extra_mats:
+            materials = pd.concat([materials, pd.DataFrame(extra_mats)], ignore_index=True)
+        # 重複を避けるため、対象月の基本SKU消費を除外
+        usage_months = set(usage_cons["year_month"].unique())
+        for base_sku in base_skus:
+            consumption = consumption[~(
+                (consumption["sku_id"] == base_sku)
+                & (consumption["year_month"].isin(usage_months))
+            )]
+        consumption = pd.concat([consumption, usage_cons], ignore_index=True)
+        log(f"  - 使用区分別消費データ追加: {usage_cons['sku_id'].nunique()}区分 / "
+            f"{len(usage_cons)}件 (基本SKU {sorted(base_skus)})")
 
     log("[2/8] データ品質検証")
     warnings_list.extend(validate_ships(ships))

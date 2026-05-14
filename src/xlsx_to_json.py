@@ -29,12 +29,24 @@ def _parse_sku_id(sku_id: str) -> tuple[str, str, str]:
     return brand, diameter, form
 
 
+_USAGE_LABEL = {"板継用": "板継用", "全姿勢用": "全姿勢用"}
+
+
 def _display_name(brand: str, diameter: str, form: str) -> str:
+    # 使用区分サフィックスを form から検出して取り出す
+    usage = ""
+    for suffix in _USAGE_LABEL:
+        if form == suffix or form.endswith(f"_{suffix}"):
+            tail = f"_{suffix}" if "_" in form and form.endswith(f"_{suffix}") else suffix
+            form = form[: len(form) - len(tail)].rstrip("_")
+            usage = f" ({suffix})"
+            break
     s = brand
     if diameter:
         s += f" φ{diameter}"
     if form:
         s += f" / {form}kg"
+    s += usage
     return s
 
 
@@ -158,12 +170,18 @@ def convert_to_dict(
         stock_eval = _arr("在庫評価", as_int=True)
         confirmed = _arr("発注済量")
         brand, diameter, form = _parse_sku_id(sku_id)
+        usage_val = None
+        for u in ("板継用", "全姿勢用"):
+            if str(sku_id).endswith(f"_{u}"):
+                usage_val = u
+                break
         sku_records.append({
             "sku": sku_id,
             "display_name": _display_name(brand, diameter, form),
             "brand": brand,
             "diameter": diameter,
             "form": form,
+            "usage": usage_val,
             "monthly_order": [round(v, 1) for v in order],
             "monthly_forecast": [round(v, 1) for v in forecast],
             "monthly_stock": [round(v, 1) if v is not None else None for v in stock],

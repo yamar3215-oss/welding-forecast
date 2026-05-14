@@ -8,6 +8,9 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
+# 循環インポート回避のため io_reader._USAGE_LOCATIONS と同値を直接定義
+_USAGE_LOCATIONS = frozenset({"板継用", "全姿勢用"})
+
 
 _SHEET_NAME = "在庫評価（製作所、在庫していない溶材削除）"
 _TITLE = "溶接棒在庫管理表 新来島どっく 大西 (予測)"
@@ -109,7 +112,16 @@ def write_inventory_format(
     orders_idx = orders.set_index(["sku_id", "year_month"])
     row_idx = 4
     for serial, sku in enumerate(skus, start=1):
-        mat = mat_map.get(sku)
+        # 使用区分サフィックスの検出
+        usage_loc = None
+        base_sku = sku
+        for loc in _USAGE_LOCATIONS:
+            if sku.endswith(f"_{loc}"):
+                usage_loc = loc
+                base_sku = sku[: -(len(loc) + 1)]
+                break
+
+        mat = mat_map.get(sku) or mat_map.get(base_sku)
         if mat is not None:
             brand = mat.get("銘柄", "")
             size = _format_size_label(mat.get("径"), mat.get("単位重量"))
@@ -118,8 +130,8 @@ def write_inventory_format(
             ws.cell(row=row_idx, column=3, value=size)
         else:
             ws.cell(row=row_idx, column=1, value=serial)
-            ws.cell(row=row_idx, column=2, value=sku)
-        ws.cell(row=row_idx, column=4, value=_DEFAULT_LOCATION)
+            ws.cell(row=row_idx, column=2, value=base_sku)
+        ws.cell(row=row_idx, column=4, value=usage_loc or _DEFAULT_LOCATION)
 
         for i, ym in enumerate(months):
             base = 5 + i * _BLOCK
