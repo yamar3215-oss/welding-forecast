@@ -1,7 +1,18 @@
-/* 溶材会議アプリ — 在庫ダッシュボード v3
+/* 溶材会議アプリ — 在庫ダッシュボード v4
    外部DB不要: 全データは window.FORECAST_DATA を参照。Supabase等は不使用。 */
 
 const useCallback = React.useCallback;
+
+// ── レスポンシブ用フック ──
+function useWindowWidth() {
+  const [w, setW] = useState(window.innerWidth);
+  React.useEffect(() => {
+    const fn = () => setW(window.innerWidth);
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+  return w;
+}
 
 // ──── 数値フォーマット ────
 const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString('ja-JP'));
@@ -403,6 +414,7 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
 }
 
 // ──── ソート可能テーブルヘッダー ────
+// top: 50 はページ固定ヘッダー（約48px）の下に追従させるため
 function ThSort({ label, sortKey, curKey, curDir, onClick }) {
   const active = sortKey === curKey;
   return (
@@ -410,7 +422,7 @@ function ThSort({ label, sortKey, curKey, curDir, onClick }) {
       padding: '9px 10px', textAlign: 'left', fontSize: 11, fontWeight: 600,
       color: active ? '#0f172a' : '#64748b', cursor: 'pointer', userSelect: 'none',
       whiteSpace: 'nowrap', borderBottom: '2px solid #e2e8f0',
-      background: active ? '#f1f5f9' : '#fafafa', position: 'sticky', top: 0, zIndex: 2,
+      background: active ? '#f1f5f9' : '#fafafa', position: 'sticky', top: 50, zIndex: 2,
     }}>
       {label} <span style={{ opacity: active ? 1 : 0.4 }}>{active ? (curDir === 'asc' ? '▲' : '▼') : '↕'}</span>
     </th>
@@ -438,6 +450,12 @@ function VariantA() {
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [selectedSku, setSelectedSku] = useState(null);
+  const [inactiveSku, setInactiveSku] = useState(new Set());
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const width = useWindowWidth();
+  const isMobile = width < 768;
+  const isTablet = width < 1024;
 
   const enriched = useMemo(() => MATERIALS.map(m => {
     const status = computeStatus(m, dangerT, cautionT);
@@ -466,6 +484,14 @@ function VariantA() {
     return Math.round(Math.sqrt(variance) / mean * 100);
   }, [selectedMaterial, skuMape]);
 
+  // 稼働銘柄のみのMAPE（非稼働SKUを除いた真の予測精度）
+  const activeMape = useMemo(() => {
+    if (inactiveSku.size === 0) return null;
+    const active = enriched.filter(m => !inactiveSku.has(m.sku) && m.mapePct != null);
+    if (!active.length) return null;
+    return Math.round(active.reduce((s, m) => s + m.mapePct, 0) / active.length);
+  }, [enriched, inactiveSku]);
+
   const displayed = useMemo(() => {
     let list = filter === 'urgent'
       ? enriched.filter(s => s.status === 'risk' || s.status === 'caution')
@@ -492,6 +518,14 @@ function VariantA() {
       const cur = prev[sku] || '未発注';
       const next = ORDER_CYCLE[(ORDER_CYCLE.indexOf(cur) + 1) % ORDER_CYCLE.length];
       return { ...prev, [sku]: next };
+    });
+  }, []);
+
+  const handleToggleInactive = useCallback((sku) => {
+    setInactiveSku(prev => {
+      const next = new Set(prev);
+      if (next.has(sku)) next.delete(sku); else next.add(sku);
+      return next;
     });
   }, []);
 
@@ -542,45 +576,78 @@ function VariantA() {
   };
 
   // KPIカードデータ
+  const inactiveCount = inactiveSku.size;
+  const activeCount = enriched.length - inactiveCount;
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
     { label: `推奨発注量（${fMonths}か月）`, value: fmt(selectedMaterial.orderSum) + ' kg', unit: `全体MAPE参考: ${mape_pct}%`, color: '#0f172a' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
-    { label: '予測精度（MAPE）', value: summary.mape_constrained != null ? summary.mape_constrained + '%' : '—', unit: '数値が低いほど精度が高い', color: summary.mape_constrained != null && summary.mape_constrained < 80 ? '#15803d' : '#b45309' },
+    {
+      label: inactiveCount > 0 ? `稼働MAPE（真の予測精度）` : '予測精度（MAPE）',
+      value: inactiveCount > 0
+        ? (activeMape != null ? activeMape + '%' : '—')
+        : (summary.mape_constrained != null ? summary.mape_constrained + '%' : '—'),
+      unit: inactiveCount > 0
+        ? `稼働${activeCount}銘柄 ／ 非稼働${inactiveCount}銘柄除外`
+        : '数値が低いほど精度が高い',
+      color: inactiveCount > 0
+        ? mapeColor(activeMape)
+        : (summary.mape_constrained != null && summary.mape_constrained < 80 ? '#15803d' : '#b45309'),
+    },
     { label: '要対応', value: `${urgentCount + cautionCount}件`, unit: `危険 ${urgentCount}件 ／ 注意 ${cautionCount}件`, color: urgentCount > 0 ? '#dc2626' : cautionCount > 0 ? '#b45309' : '#15803d' },
   ];
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f1f5f9', overflow: 'hidden' }}>
+  // KPIグリッド列数（レスポンシブ）
+  const kpiCols = isMobile ? '1fr' : isTablet ? 'repeat(2,1fr)' : 'repeat(3,1fr)';
 
-      {/* ヘッダー */}
-      <header style={{ background: '#0f172a', color: '#fff', padding: '10px 20px',
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#f1f5f9' }}>
+
+      {/* ヘッダー（ページ上部に固定） */}
+      <header style={{
+        background: '#0f172a', color: '#fff', padding: '10px 20px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        boxShadow: '0 2px 8px rgba(0,0,0,.3)', flexShrink: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        boxShadow: '0 2px 8px rgba(0,0,0,.3)', flexShrink: 0,
+        position: 'sticky', top: 0, zIndex: 100,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* ハンバーガーメニュー（モバイルのみ） */}
+          {isMobile && (
+            <button onClick={() => setSidebarOpen(s => !s)} style={{
+              background: 'rgba(255,255,255,.15)', color: '#fff', border: 'none',
+              borderRadius: 6, padding: '8px 10px', fontSize: 18, cursor: 'pointer',
+              minHeight: 44, minWidth: 44, lineHeight: 1,
+            }}>☰</button>
+          )}
           {selectedSku && (
             <button onClick={() => setSelectedSku(null)} style={{
               background: 'rgba(255,255,255,.1)', color: '#93c5fd',
               border: '1px solid rgba(255,255,255,.2)',
-              borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+              borderRadius: 6, padding: '5px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600,
+              minHeight: 44,
+            }}>
               ← 全体に戻る
             </button>
           )}
-          <div style={{ fontSize: 18, fontWeight: 700 }}>🔧 在庫ダッシュボード</div>
-          {selectedMaterial && (
+          <div style={{ fontSize: isMobile ? 14 : 18, fontWeight: 700 }}>🔧 在庫ダッシュボード</div>
+          {selectedMaterial && !isMobile && (
             <div style={{ fontSize: 13, color: '#7dd3fc', fontWeight: 600 }}>
               › {selectedMaterial.code}
             </div>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#93c5fd' }}>溶材会議日：{mDate}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {!isMobile && (
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#93c5fd' }}>溶材会議日：{mDate}</div>
+          )}
           <label style={{
             background: uploading ? '#334155' : '#059669', color: '#fff',
             borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 13,
-            cursor: uploading ? 'not-allowed' : 'pointer', display: 'inline-block', userSelect: 'none' }}>
+            cursor: uploading ? 'not-allowed' : 'pointer', display: 'inline-block',
+            userSelect: 'none', minHeight: 44, display: 'flex', alignItems: 'center',
+          }}>
             <input type="file" accept=".xlsx" onChange={handleUploadFile}
               style={{ display: 'none' }} disabled={uploading} />
             {uploading ? '送信中…' : '📤 Excel更新'}
@@ -588,8 +655,9 @@ function VariantA() {
           <button onClick={handleRerun} disabled={running} style={{
             background: running ? '#334155' : '#0ea5e9', color: '#fff', border: 'none',
             borderRadius: 8, padding: '8px 18px', fontWeight: 700, fontSize: 13,
-            cursor: running ? 'not-allowed' : 'pointer' }}>
-            {running ? '計算中…' : '▶ 予測を再実行'}
+            cursor: running ? 'not-allowed' : 'pointer', minHeight: 44,
+          }}>
+            {running ? '計算中…' : (isMobile ? '▶ 再実行' : '▶ 予測を再実行')}
           </button>
         </div>
       </header>
@@ -615,18 +683,51 @@ function VariantA() {
 
       <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0',
         padding: '5px 20px', fontSize: 11, color: '#64748b',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
+        flexWrap: 'wrap', gap: 4 }}>
         <span>予測期間 {fd.period_start} 〜 {fd.period_end} ／ 生成: {fd.generated_at}</span>
         <span style={{ fontWeight: 600, color: '#334155' }}>
           総予測 {fmt(summary.total_forecast_kg)} kg ｜ MAPE {summary.mape_constrained != null ? summary.mape_constrained + '%' : '—'} ｜ 警告 {summary.warnings ?? '—'} 件
+          {inactiveCount > 0 && (
+            <span style={{ color: '#94a3b8', marginLeft: 8 }}>（非稼働{inactiveCount}銘柄除外）</span>
+          )}
         </span>
       </div>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flex: 1 }}>
+
+        {/* モバイル時のバックドロップ */}
+        {isMobile && sidebarOpen && (
+          <div
+            onClick={() => setSidebarOpen(false)}
+            style={{
+              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+              zIndex: 150,
+            }}
+          />
+        )}
 
         {/* サイドバー */}
-        <aside style={{ width: 210, flexShrink: 0, background: '#fff', borderRight: '1px solid #e2e8f0',
-          padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: 20, overflowY: 'auto' }}>
+        <aside style={{
+          width: 210, flexShrink: 0, background: '#fff', borderRight: '1px solid #e2e8f0',
+          padding: '16px 14px', display: 'flex', flexDirection: 'column', gap: 20,
+          overflowY: 'auto',
+          ...(isMobile ? {
+            position: 'fixed', top: 0, bottom: 0, left: sidebarOpen ? 0 : -220,
+            zIndex: 200, transition: 'left 0.22s ease', boxShadow: sidebarOpen ? '4px 0 20px rgba(0,0,0,0.2)' : 'none',
+          } : {
+            position: 'sticky', top: 50, maxHeight: 'calc(100vh - 50px)', alignSelf: 'flex-start',
+          }),
+        }}>
+
+          {/* モバイル時の閉じるボタン */}
+          {isMobile && (
+            <button onClick={() => setSidebarOpen(false)} style={{
+              alignSelf: 'flex-end', background: '#f1f5f9', border: 'none',
+              borderRadius: 6, padding: '6px 12px', fontSize: 13, cursor: 'pointer',
+              color: '#475569', fontWeight: 600, minHeight: 44,
+            }}>✕ 閉じる</button>
+          )}
 
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>予測表示月数</div>
@@ -636,7 +737,9 @@ function VariantA() {
                   padding: '7px 0', fontSize: 13, fontWeight: 600,
                   background: fMonths === n ? '#0f172a' : '#f1f5f9',
                   color: fMonths === n ? '#fff' : '#475569',
-                  border: 'none', borderRadius: 6, cursor: 'pointer' }}>{n}か月</button>
+                  border: 'none', borderRadius: 6, cursor: 'pointer',
+                  minHeight: 40,
+                }}>{n}か月</button>
               ))}
             </div>
           </div>
@@ -671,9 +774,26 @@ function VariantA() {
                 fontWeight: filter === key ? 700 : 500,
                 background: filter === key ? '#f1f5f9' : 'transparent',
                 color: filter === key ? '#0f172a' : '#64748b',
-                border: 'none', borderRadius: 6, cursor: 'pointer' }}>{label}</button>
+                border: 'none', borderRadius: 6, cursor: 'pointer',
+                minHeight: 40,
+              }}>{label}</button>
             ))}
           </div>
+
+          {inactiveCount > 0 && (
+            <div style={{ background: '#fef9c3', borderRadius: 8, padding: '10px 12px', border: '1px solid #fde68a' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#a16207', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>非稼働銘柄</div>
+              <div style={{ fontSize: 12, color: '#92400e', fontWeight: 600 }}>{inactiveCount}銘柄 除外中</div>
+              <div style={{ fontSize: 11, color: '#a16207', marginTop: 2 }}>
+                稼働MAPE: {activeMape != null ? `${activeMape}%` : '—'}
+              </div>
+              <button onClick={() => setInactiveSku(new Set())} style={{
+                marginTop: 8, fontSize: 11, padding: '4px 10px', borderRadius: 6,
+                background: '#fff', border: '1px solid #fde68a',
+                color: '#a16207', cursor: 'pointer', width: '100%', fontWeight: 600,
+              }}>すべて稼働に戻す</button>
+            </div>
+          )}
 
           {selectedMaterial && (
             <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '12px', border: '1px solid #bae6fd' }}>
@@ -698,7 +818,8 @@ function VariantA() {
               <button onClick={() => setSelectedSku(null)} style={{
                 fontSize: 11, padding: '4px 10px', borderRadius: 6,
                 background: '#fff', border: '1px solid #bae6fd',
-                color: '#0ea5e9', cursor: 'pointer', width: '100%', fontWeight: 600 }}>
+                color: '#0ea5e9', cursor: 'pointer', width: '100%', fontWeight: 600,
+              }}>
                 選択解除
               </button>
             </div>
@@ -706,14 +827,14 @@ function VariantA() {
 
         </aside>
 
-        <main style={{ flex: 1, padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <main style={{ flex: 1, padding: isMobile ? 10 : 16, display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
 
-          {/* KPIカード */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+          {/* KPIカード（レスポンシブ） */}
+          <div style={{ display: 'grid', gridTemplateColumns: kpiCols, gap: 12 }}>
             {kpiCards.map(({ label, value, unit, color }) => (
               <div key={label} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '14px 18px' }}>
                 <div style={{ fontSize: 11, color: '#64748b', fontWeight: 500, marginBottom: 6 }}>{label}</div>
-                <div style={{ fontSize: 30, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                <div style={{ fontSize: isMobile ? 22 : 30, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
                 <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{unit}</div>
               </div>
             ))}
@@ -763,30 +884,47 @@ function VariantA() {
           {/* 材料一覧テーブル */}
           <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden' }}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #e2e8f0',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>
                 全材料在庫一覧
                 <span style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginLeft: 8 }}>{displayed.length}銘柄</span>
+                {inactiveCount > 0 && (
+                  <span style={{ fontSize: 11, color: '#a16207', background: '#fef9c3', borderRadius: 6, padding: '1px 8px', marginLeft: 8, fontWeight: 600 }}>
+                    非稼働{inactiveCount}銘柄あり
+                  </span>
+                )}
               </div>
-              <div style={{ fontSize: 11, color: '#94a3b8' }}>「詳細」ボタンまたは材料名クリックで個別グラフを表示</div>
+              {!isMobile && (
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>「詳細」または材料名クリックで個別グラフ表示 ／ 「稼働」ボタンで MAPE 計算から除外</div>
+              )}
             </div>
 
-            <div style={{ overflowX: 'auto', maxHeight: 380, overflowY: 'auto' }}>
+            {/* overflowY: clip でページスクロール時に th の position:sticky が機能する */}
+            <div style={{ overflowX: 'auto', overflowY: 'clip' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr>
-                    <th style={{ padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
+                    <th style={{
+                      padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
                       borderBottom: '2px solid #e2e8f0', background: '#fafafa',
-                      whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 2, width: 72 }}>詳細</th>
+                      whiteSpace: 'nowrap', position: 'sticky', top: 50, zIndex: 2, width: 72,
+                    }}>詳細</th>
                     <ThSort label="状態" sortKey="statusRank" {...thProps}/>
                     <ThSort label="材料名" sortKey="code" {...thProps}/>
                     <ThSort label="現在庫 (kg)" sortKey="current" {...thProps}/>
                     <ThSort label="残日数" sortKey="daysLeft" {...thProps}/>
                     <ThSort label="月間消費 (kg)" sortKey="monthly" {...thProps}/>
                     <ThSort label={`推奨発注量 (${fMonths}か月・kg)`} sortKey="orderSum" {...thProps}/>
-                    <th style={{ padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
+                    <th style={{
+                      padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
                       borderBottom: '2px solid #e2e8f0', background: '#fafafa',
-                      whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 2 }}>発注状況</th>
+                      whiteSpace: 'nowrap', position: 'sticky', top: 50, zIndex: 2,
+                    }}>発注状況</th>
+                    <th style={{
+                      padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
+                      borderBottom: '2px solid #e2e8f0', background: '#fafafa',
+                      whiteSpace: 'nowrap', position: 'sticky', top: 50, zIndex: 2, textAlign: 'center',
+                    }}>稼働</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -797,12 +935,14 @@ function VariantA() {
                     const bc = barColor(m.daysLeft, dangerT, cautionT);
                     const pct = Math.min(100, Math.max(0, ((m.daysLeft || 0) / (cautionT * 2)) * 100));
                     const isSel = selectedSku === m.sku;
+                    const isInactive = inactiveSku.has(m.sku);
                     return (
                       <tr key={m.sku} style={{
                         background: isSel ? '#f0f9ff' : i % 2 === 0 ? '#fff' : '#fafafa',
                         borderBottom: '1px solid #f1f5f9',
                         outline: isSel ? '2px solid #0ea5e9' : 'none',
                         outlineOffset: -1,
+                        opacity: isInactive ? 0.45 : 1,
                       }}>
                         <td style={{ padding: '6px 8px', textAlign: 'center' }}>
                           <button onClick={() => setSelectedSku(isSel ? null : m.sku)} style={{
@@ -811,23 +951,24 @@ function VariantA() {
                             background: isSel ? '#0ea5e9' : '#f8fafc',
                             color: isSel ? '#fff' : '#475569',
                             borderColor: isSel ? '#0ea5e9' : '#e2e8f0',
-                            minWidth: 54,
+                            minWidth: 54, minHeight: 32,
                           }}>
                             {isSel ? '✓選択中' : '詳細'}
                           </button>
                         </td>
                         <td style={{ padding: '8px 10px' }}>
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5,
-                            background: st.bg, color: st.color,
+                            background: isInactive ? '#f1f5f9' : st.bg,
+                            color: isInactive ? '#94a3b8' : st.color,
                             borderRadius: 999, padding: '2px 9px', fontSize: 11, fontWeight: 600 }}>
-                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: st.dot }}/>
-                            {st.label}
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: isInactive ? '#94a3b8' : st.dot }}/>
+                            {isInactive ? '非稼働' : st.label}
                           </span>
                         </td>
                         <td style={{ padding: '8px 10px' }}>
                           <button onClick={() => setSelectedSku(isSel ? null : m.sku)} style={{
                             background: 'none', border: 'none', cursor: 'pointer',
-                            fontWeight: 600, color: '#0f172a', fontSize: 12, padding: 0,
+                            fontWeight: 600, color: isInactive ? '#94a3b8' : '#0f172a', fontSize: 12, padding: 0,
                             textDecoration: isSel ? 'underline' : 'none',
                             textDecorationColor: '#0ea5e9', whiteSpace: 'nowrap',
                           }}>
@@ -849,8 +990,26 @@ function VariantA() {
                         <td style={{ padding: '8px 10px' }}>
                           <button onClick={() => cycleOrder(m.sku)} style={{
                             padding: '3px 12px', borderRadius: 999, fontSize: 11, fontWeight: 600,
-                            cursor: 'pointer', border: 'none', background: os.bg, color: os.color, minWidth: 56 }}>
+                            cursor: 'pointer', border: 'none', background: os.bg, color: os.color,
+                            minWidth: 56, minHeight: 32,
+                          }}>
                             {ord}
+                          </button>
+                        </td>
+                        <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                          <button
+                            onClick={() => handleToggleInactive(m.sku)}
+                            title={isInactive ? '稼働に戻す' : 'MAPEから除外する'}
+                            style={{
+                              padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                              cursor: 'pointer', border: '1px solid',
+                              background: isInactive ? '#fef9c3' : '#f1f5f9',
+                              color: isInactive ? '#a16207' : '#64748b',
+                              borderColor: isInactive ? '#fde68a' : '#e2e8f0',
+                              minWidth: 60, minHeight: 32,
+                            }}
+                          >
+                            {isInactive ? '非稼働' : '稼働中'}
                           </button>
                         </td>
                       </tr>
