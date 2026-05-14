@@ -16,6 +16,7 @@ function useWindowWidth() {
 
 // ──── 数値フォーマット ────
 const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString('ja-JP'));
+const fmtYMLabel = (ym) => ym ? `${ym.slice(0,4)}年${parseInt(ym.slice(5,7))}月` : '—';
 
 function daysToText(days) {
   if (days == null || days >= 999) return '—';
@@ -283,16 +284,34 @@ function ForecastChart({ series, months, skus, mape_pct, ships }) {
 }
 
 // ──── 個別銘柄予測グラフ ────
+const SIM_MULT = [0, 0.5, 1.0, 1.5, 2.0];
+const SIM_LABELS = ['発注なし', '50%', '推奨通り', '150%', '200%'];
+const SIM_COLORS = ['#94a3b8', '#f59e0b', '#22c55e', '#f97316', '#ef4444'];
+
 function SkuForecastChart({ material, months, mape_pct, ships }) {
   const W = 900, H = 210, PL = 68, PR = 20, PT = 22, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
   const fcArr = material.monthlyForecastArr || [];
   const stArr = material.monthlyStockArr || [];
+  const orderArr = material.monthlyOrderArr || [];
+  const [simLevel, setSimLevel] = useState(3);
+  const simColor = SIM_COLORS[simLevel - 1];
+
+  // シミュレーション在庫: 現在庫 から消費を引き、発注倍率分を補充
+  const simStock = useMemo(() => {
+    const mult = SIM_MULT[simLevel - 1];
+    let s = material.current;
+    return fcArr.map((fc, i) => {
+      s = s - (fc || 0) + mult * (orderArr[i] || 0);
+      return Math.max(0, s);
+    });
+  }, [material, simLevel]);
+
   const ci = useMemo(() => computeCI(fcArr, mape_pct), [material, mape_pct]);
   const maxV = useMemo(() => {
-    const all = [...fcArr, ...stArr.filter(v => v != null), ...ci.map(c => c.upper)];
+    const all = [...fcArr, ...stArr.filter(v => v != null), ...simStock, ...ci.map(c => c.upper)];
     return Math.max(...all, 1);
-  }, [fcArr, stArr, ci]);
+  }, [fcArr, stArr, simStock, ci]);
   if (!months || months.length < 2) return null;
   const sx = makeXMapper(months, PL, iW);
   const sy = (v) => PT + (1 - Math.min(Math.max(v, 0), maxV) / maxV) * iH;
@@ -301,12 +320,36 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
   const fcPoly = fcArr.map((v, i) => `${sx(months[i])},${sy(v)}`).join(' ');
   const stPts = stArr.map((v, i) => v != null ? [sx(months[i]), sy(v)] : null).filter(Boolean);
   const stPoly = stPts.map(([x, y]) => `${x},${y}`).join(' ');
+  const simPts = simStock.map((v, i) => months[i] ? [sx(months[i]), sy(v)] : null).filter(Boolean);
+  const simPoly = simPts.map(([x, y]) => `${x},${y}`).join(' ');
   const upperPts = fcArr.map((_, i) => [sx(months[i]), sy(ci[i].upper)]);
   const lowerPts = fcArr.map((_, i) => [sx(months[i]), sy(ci[i].lower)]).reverse();
   const ciPoly = [...upperPts, ...lowerPts].map(([x, y]) => `${x},${y}`).join(' ');
   const activeShips = enrichShips(ships, months[0], months[months.length - 1]);
+  const finalSimStock = simStock[simStock.length - 1];
   return (
     <div>
+      {/* 発注シミュレーター */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11, color: '#475569', fontWeight: 700, whiteSpace: 'nowrap', marginRight: 2 }}>発注シミュレーター:</span>
+        {[1,2,3,4,5].map(lv => (
+          <button key={lv} onClick={() => setSimLevel(lv)} style={{
+            padding: '4px 9px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+            cursor: 'pointer', border: '1.5px solid',
+            background: simLevel === lv ? SIM_COLORS[lv-1] : '#f8fafc',
+            color: simLevel === lv ? '#fff' : '#64748b',
+            borderColor: simLevel === lv ? SIM_COLORS[lv-1] : '#e2e8f0',
+            minHeight: 30,
+          }}>
+            Lv{lv} {SIM_LABELS[lv-1]}
+          </button>
+        ))}
+        {finalSimStock != null && (
+          <span style={{ marginLeft: 6, fontSize: 11, color: '#64748b' }}>
+            → 期末在庫(推定): <b style={{ color: simColor }}>{fmt(Math.round(finalSimStock))} kg</b>
+          </span>
+        )}
+      </div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
         {yTicks.map((t, i) => (
           <g key={i}>
@@ -336,8 +379,16 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
         )}
         {stPoly && stPts.length > 1 && (
           <>
-            <polyline points={stPoly} fill="none" stroke="#22c55e" strokeWidth={1.5} strokeDasharray="5 2"/>
-            {stPts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={2.5} fill="#22c55e"/>)}
+            <polyline points={stPoly} fill="none" stroke="#22c55e" strokeWidth={1} strokeDasharray="5 2" strokeOpacity={0.5}/>
+            {stPts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={2} fill="#22c55e" opacity={0.5}/>)}
+          </>
+        )}
+        {/* シミュレーション在庫ライン */}
+        {simPoly && simPts.length > 1 && (
+          <>
+            <polyline points={simPoly} fill="none" stroke={simColor} strokeWidth={2.5}
+              strokeDasharray={simLevel === 3 ? 'none' : '7 3'}/>
+            {simPts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={3} fill={simColor}/>)}
           </>
         )}
         {fcArr.length > 1 && (
@@ -357,16 +408,62 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
         <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
         <circle cx={PL+10} cy={PT-7} r={3.5} fill="#0ea5e9"/>
         <text x={PL+16} y={PT-4} fontSize={9} fill="#475569">予測消費量</text>
-        <line x1={PL+76} y1={PT-7} x2={PL+88} y2={PT-7} stroke="#22c55e" strokeWidth={1.5} strokeDasharray="4 2"/>
-        <text x={PL+91} y={PT-4} fontSize={9} fill="#475569">予測在庫</text>
-        <rect x={PL+138} y={PT-13} width={12} height={9}
+        <line x1={PL+76} y1={PT-7} x2={PL+92} y2={PT-7} stroke={simColor} strokeWidth={2}
+          strokeDasharray={simLevel === 3 ? 'none' : '5 2'}/>
+        <text x={PL+95} y={PT-4} fontSize={9} fill="#475569">在庫({SIM_LABELS[simLevel-1]})</text>
+        <rect x={PL+185} y={PT-13} width={12} height={9}
           fill="#0ea5e9" fillOpacity={0.2} stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.5} rx={1}/>
-        <text x={PL+152} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
+        <text x={PL+199} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
       </svg>
       <ShipTimeline ships={ships} allYms={months} PL={PL} PR={PR}/>
       {fcArr.length > 0 && ci.length > 0 && (
         <CINote fcVal0={fcArr[0]} ci0={ci[0]} ciLast={ci[ci.length - 1]}/>
       )}
+    </div>
+  );
+}
+
+// ──── 発注根拠パネル ────
+function OrderRationalePanel({ material, ships, months }) {
+  if (!material || !months || months.length === 0) return null;
+  const start = months[0], end = months[months.length - 1];
+  const active = enrichShips(ships, start, end);
+  if (active.length === 0) return null;
+  // 全予測月から消費ピーク月を特定（chartMonths が部分表示でも正しく取得）
+  const fcArr = material.monthlyForecastArr || [];
+  const allMonths = (window.FORECAST_PERIOD || {}).months || months;
+  const peakIdx = fcArr.reduce((mx, v, i) => (v > (fcArr[mx] || 0) ? i : mx), 0);
+  const peakYM = allMonths[peakIdx] || months[months.length - 1];
+  const peakVal = fcArr[peakIdx] || 0;
+  return (
+    <div style={{ marginTop: 10, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 14px' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#15803d', marginBottom: 6 }}>発注根拠 — 建造スケジュールとの関連</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {active.map(ship => {
+          const col = vColor(ship.vessel);
+          const inConstruct = peakYM >= ship.constructYM && peakYM <= ship.loadYM;
+          return (
+            <div key={ship.id} style={{ fontSize: 11, color: '#374151', display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: col, marginTop: 2, flexShrink: 0 }}/>
+              <span>
+                <b style={{ color: col }}>{ship.vessel}</b> #{ship.id} —
+                着工 {fmtYMLabel(ship.constructYM)} → 積み出し {fmtYMLabel(ship.loadYM)}
+                {inConstruct && peakVal > 0 && (
+                  <span style={{ color: '#dc2626', fontWeight: 600 }}>
+                    {' '}（消費ピーク {fmtYMLabel(peakYM)}: {fmt(Math.round(peakVal))}kg 重複）
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+        {peakVal > 0 && (
+          <div style={{ fontSize: 11, color: '#475569', marginTop: 4, paddingTop: 4, borderTop: '1px solid #d1fae5' }}>
+            消費ピーク月: <b>{fmtYMLabel(peakYM)}</b> — {fmt(Math.round(peakVal))} kg
+            （月間平均の {Math.round(peakVal / Math.max(1, material.monthly) * 100)}%）
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -424,7 +521,8 @@ function VariantA() {
   const globalMape = summary.mape_constrained || 20;
 
   // ── 状態 ──
-  const [fMonths, setFMonths] = useState(3);       // グラフ表示月数
+  const [fMonths, setFMonths] = useState(6);       // グラフ表示月数
+  const [startOffset, setStartOffset] = useState(0); // グラフ開始月インデックス
   const [orderMonths, setOrderMonths] = useState(3); // 推奨発注計算月数（1〜6）
   const [dangerT, setDangerT] = useState(15);
   const [cautionT, setCautionT] = useState(35);
@@ -504,6 +602,27 @@ function VariantA() {
 
   const inactiveCount = inactiveSku.size;
   const activeCountInDisplayed = displayed.filter(m => !inactiveSku.has(m.sku)).length;
+
+  // グラフ表示月: startOffset から fMonths 分
+  const chartMonths = useMemo(() => {
+    const off = Math.min(startOffset, Math.max(0, months.length - 1));
+    return months.slice(off, off + fMonths);
+  }, [months, startOffset, fMonths]);
+
+  // グラフ用データ: 配列もwindowに合わせてスライス
+  const chartMaterial = useMemo(() => {
+    if (!selectedMaterial) return null;
+    const off = Math.min(startOffset, Math.max(0, months.length - 1));
+    const n = chartMonths.length;
+    const sl = (arr) => (arr || []).slice(off, off + n);
+    return {
+      ...selectedMaterial,
+      monthlyForecastArr: sl(selectedMaterial.monthlyForecastArr),
+      monthlyStockArr:    sl(selectedMaterial.monthlyStockArr),
+      monthlyOrderArr:    sl(selectedMaterial.monthlyOrderArr),
+      monthlyConfirmedArr: sl(selectedMaterial.monthlyConfirmedArr),
+    };
+  }, [selectedMaterial, startOffset, chartMonths]);
 
   // ── ハンドラ ──
   const handleSort = useCallback((key) => {
@@ -758,7 +877,7 @@ function VariantA() {
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>グラフ表示月数</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-              {[1, 3, 6, 12].map(n => (
+              {[3, 6, 9, 12].map(n => (
                 <button key={n} onClick={() => setFMonths(n)} style={{
                   padding: '7px 0', fontSize: 13, fontWeight: 600,
                   background: fMonths === n ? '#0f172a' : '#f1f5f9',
@@ -767,6 +886,31 @@ function VariantA() {
                 }}>{n}か月</button>
               ))}
             </div>
+          </div>
+
+          {/* 予測開始月 */}
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>予測開始月</div>
+            <select
+              value={startOffset}
+              onChange={e => setStartOffset(Number(e.target.value))}
+              style={{
+                width: '100%', padding: '6px 8px', borderRadius: 6,
+                border: '1px solid #cbd5e1', fontSize: 12, background: '#fff',
+                color: '#0f172a', cursor: 'pointer',
+              }}
+            >
+              {months.map((ym, i) => (
+                <option key={ym} value={i}>{fmtYMLabel(ym)}〜</option>
+              ))}
+            </select>
+            {startOffset > 0 && (
+              <button onClick={() => setStartOffset(0)} style={{
+                marginTop: 4, width: '100%', fontSize: 11, padding: '3px 0',
+                background: '#f1f5f9', border: 'none', borderRadius: 6,
+                color: '#64748b', cursor: 'pointer',
+              }}>先頭に戻す</button>
+            )}
           </div>
 
           {/* 推奨発注計算期間（スライダー: 1〜6か月） */}
@@ -941,12 +1085,13 @@ function VariantA() {
                     </span>
                   </div>
                 </div>
-                <SkuForecastChart material={selectedMaterial} months={months} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
+                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
+                <OrderRationalePanel material={selectedMaterial} ships={SHIPS} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
               </>
             ) : (
               <>
                 <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', marginBottom: 10 }}>月次予測推移（使用量 kg）</div>
-                <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
+                <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={displayedMape || globalMape} ships={SHIPS} highlightMonths={chartMonths}/>
               </>
             )}
           </div>
