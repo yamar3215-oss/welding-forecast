@@ -1078,9 +1078,8 @@ function VariantA() {
   const globalMapeByMonth = fd.mape_by_month || {};
 
   // ── 状態 ──
-  const [fMonths, setFMonths] = useState(6);       // グラフ表示月数
-  const [startOffset, setStartOffset] = useState(0); // グラフ開始月インデックス
-  // 評価3達成発注量 (orderSum) は月間消費×3.0−現在庫で固定算出 (orderMonths設定不要)
+  const [fMonths, setFMonths] = useState(6);
+  const [startOffset, setStartOffset] = useState(0);
   const [dangerT, setDangerT] = useState(15);
   const [cautionT, setCautionT] = useState(35);
   const [orderStatus, setOrderStatus] = useState({});
@@ -1090,8 +1089,6 @@ function VariantA() {
   const [running, setRunning] = useState(false);
   const [runMsg, setRunMsg] = useState('');
   const [uploadPanel, setUploadPanel] = useState(false);
-  const [meetingSkus, setMeetingSkus] = useState([]);
-  const [meetingFile, setMeetingFile] = useState(null);
   const [uploadStates, setUploadStates] = useState({
     inventory: { uploading: false, msg: '' },
     data:      { uploading: false, msg: '' },
@@ -1101,8 +1098,14 @@ function VariantA() {
   const [inactiveSku, setInactiveSku] = useState(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [finalDecisionInput, setFinalDecisionInput] = useState('');
-  const [finalDecision, setFinalDecision] = useState(null);   // 確定した最終決定量 (kg)
+  const [finalDecision, setFinalDecision] = useState(null);
   const [finalDecisionMsg, setFinalDecisionMsg] = useState('');
+  const [showShips, setShowShips] = useState(false);  // 船表情報の表示/非表示 (デフォルト: 非表示)
+  // お気に入り: localStorage永続化
+  const [favorites, setFavorites] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('wf_favorites') || '[]')); }
+    catch (_) { return new Set(); }
+  });
 
   const width = useWindowWidth();
   const isMobile = width < 768;
@@ -1118,34 +1121,9 @@ function VariantA() {
 
   const urgentCount = useMemo(() => enriched.filter(s => s.status === 'risk').length, [enriched]);
   const cautionCount = useMemo(() => enriched.filter(s => s.status === 'caution').length, [enriched]);
-  // 溶材会議: 納品書に含まれる銘柄（なければアラート銘柄にフォールバック）
-  // 正規化マッチング: trailing underscore 除去 + prefix + 板継用/全姿勢用サフィックス
-  const meetingList = useMemo(() => {
-    if (meetingSkus.length === 0) return enriched.filter(s => s.status === 'risk' || s.status === 'caution');
-    const USAGE_SFXS = ['_板継用', '_全姿勢用'];
-    const normSet = new Set(meetingSkus.map(s => s.replace(/_+$/, '')));
-    return enriched.filter(s => {
-      // 1: 完全一致
-      if (meetingSkus.includes(s.sku)) return true;
-      const normSku = s.sku.replace(/_+$/, '');
-      // 2: 正規化完全一致
-      if (normSet.has(normSku)) return true;
-      // 3: 板継用/全姿勢用サフィックスを除いた基底が一致
-      for (const sfx of USAGE_SFXS) {
-        if (s.sku.endsWith(sfx)) {
-          const base = s.sku.slice(0, -sfx.length);
-          const normBase = base.replace(/_+$/, '');
-          if (meetingSkus.includes(base) || normSet.has(normBase)) return true;
-        }
-      }
-      // 4: prefix マッチ (納品表 SKU が forecast SKU の prefix、またはその逆)
-      for (const ms of normSet) {
-        if (normSku.startsWith(ms + '_') || ms.startsWith(normSku + '_')) return true;
-      }
-      return false;
-    });
-  }, [enriched, meetingSkus]);
-  const meetingCount = meetingList.length;
+
+  // お気に入りリスト
+  const favList = useMemo(() => enriched.filter(m => favorites.has(m.sku)), [enriched, favorites]);
 
   const selectedMaterial = useMemo(() =>
     selectedSku ? enriched.find(m => m.sku === selectedSku) : null,
@@ -1164,7 +1142,7 @@ function VariantA() {
   }, [selectedMaterial, skuMape]);
 
   const displayed = useMemo(() => {
-    let list = filter === 'meeting' ? [...meetingList] : [...enriched];
+    let list = filter === 'favorites' ? [...favList] : [...enriched];
     list.sort((a, b) => {
       let av = a[sortKey], bv = b[sortKey];
       if (av == null) av = sortDir === 'asc' ? Infinity : -Infinity;
@@ -1173,7 +1151,7 @@ function VariantA() {
       return sortDir === 'asc' ? av - bv : bv - av;
     });
     return list;
-  }, [enriched, meetingList, filter, sortKey, sortDir]);
+  }, [enriched, favList, filter, sortKey, sortDir]);
 
   // 表示中の稼働銘柄のみのMAPE（フィルター + 非稼働除外 に連動）
   const displayedMape = useMemo(() => {
@@ -1240,6 +1218,26 @@ function VariantA() {
     });
   }, []);
 
+  const toggleFavorite = useCallback((sku) => {
+    setFavorites(prev => {
+      const next = new Set(prev);
+      if (next.has(sku)) next.delete(sku); else next.add(sku);
+      return next;
+    });
+  }, []);
+
+  // 表示中リストで前後に移動
+  const displayedIdx = useMemo(() =>
+    selectedSku ? displayed.findIndex(m => m.sku === selectedSku) : -1,
+    [selectedSku, displayed]);
+  const navPrev = useCallback(() => {
+    if (displayedIdx > 0) setSelectedSku(displayed[displayedIdx - 1].sku);
+  }, [displayedIdx, displayed]);
+  const navNext = useCallback(() => {
+    if (displayedIdx >= 0 && displayedIdx < displayed.length - 1)
+      setSelectedSku(displayed[displayedIdx + 1].sku);
+  }, [displayedIdx, displayed]);
+
   const handleRerun = async () => {
     setRunning(true);
     setRunMsg('予測計算を開始しました。完了後にページを再読み込みしてください（1〜3分）。');
@@ -1298,26 +1296,23 @@ function VariantA() {
     setFinalDecisionMsg('');
   }, [selectedSku]);
 
-  // 溶材会議 SKU リストを起動時に取得
+  // お気に入り変更時にlocalStorageへ保存
   useEffect(() => {
-    fetch('/api/meeting-skus')
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d && d.skus) { setMeetingSkus(d.skus); setMeetingFile(d.filename); } })
-      .catch(() => {});
-  }, []);
+    try { localStorage.setItem('wf_favorites', JSON.stringify([...favorites])); } catch (_) {}
+  }, [favorites]);
 
   const thProps = { curKey: sortKey, curDir: sortDir, onClick: handleSort };
   const mDate = (typeof fmtYM === 'function' && typeof MEETING_DATE !== 'undefined') ? fmtYM(MEETING_DATE) : '—';
 
   // ── MAPE KPIカードの動的ラベル・値（フィルター + 非稼働に連動） ──
-  const mapeKpiLabel = filter === 'meeting'
-    ? `溶材会議MAPE（${displayed.length}銘柄）`
+  const mapeKpiLabel = filter === 'favorites'
+    ? `お気に入りMAPE（${displayed.length}銘柄）`
     : inactiveCount > 0
       ? `稼働MAPE（真の予測精度）`
       : '予測精度 (MAPE)';
   const mapeKpiValue = fmtMape(displayedMape);
-  const mapeKpiUnit = filter === 'meeting'
-    ? `溶材会議銘柄の平均 ／ 全体: ${fmtMape(globalMape)}`
+  const mapeKpiUnit = filter === 'favorites'
+    ? `お気に入り銘柄の平均 ／ 全体: ${fmtMape(globalMape)}`
     : inactiveCount > 0
       ? `稼働${activeCountInDisplayed}銘柄 ／ 非稼働${inactiveCount}銘柄除外`
       : `全${enriched.length}銘柄の平均`;
@@ -1331,7 +1326,7 @@ function VariantA() {
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
-    { label: '溶材会議', value: `${meetingCount}件`, unit: meetingSkus.length > 0 ? `納品書: ${meetingFile || '読込済'}` : `危険 ${urgentCount}件 ／ 注意 ${cautionCount}件`, color: urgentCount > 0 ? '#dc2626' : cautionCount > 0 ? '#b45309' : '#0891b2' },
+    { label: 'お気に入り銘柄', value: `${favList.length}件`, unit: `全${enriched.length}銘柄中 ／ 危険 ${urgentCount}件 注意 ${cautionCount}件`, color: favList.length > 0 ? '#f59e0b' : '#94a3b8' },
   ];
 
   const kpiCols = isMobile ? '1fr' : isTablet ? 'repeat(2,1fr)' : 'repeat(3,1fr)';
@@ -1368,8 +1363,19 @@ function VariantA() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {!isMobile && (
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#93c5fd' }}>溶材会議日：{mDate}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#93c5fd' }}>会議日：{mDate}</div>
           )}
+          {/* 船表情報 トグル（社外秘対応） */}
+          <button onClick={() => setShowShips(s => !s)} style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            background: showShips ? '#dc2626' : 'rgba(255,255,255,0.12)',
+            color: showShips ? '#fff' : '#94a3b8',
+            border: `1px solid ${showShips ? '#dc2626' : 'rgba(255,255,255,0.2)'}`,
+            borderRadius: 8, padding: '0 12px', fontWeight: 700, fontSize: 12,
+            cursor: 'pointer', minHeight: 44, whiteSpace: 'nowrap',
+          }}>
+            {showShips ? '🚢 船表: 表示中' : '🔒 船表: 非表示'}
+          </button>
           <button onClick={() => setUploadPanel(p => !p)} style={{
             background: uploadPanel ? '#0f766e' : '#059669', color: '#fff', border: 'none',
             borderRadius: 8, padding: '0 14px', fontWeight: 700, fontSize: 13,
@@ -1570,22 +1576,23 @@ function VariantA() {
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>絞り込み</div>
             {[
-              { key: 'all', label: `全銘柄 (${enriched.length}件)` },
-              { key: 'meeting', label: `溶材会議 (${meetingCount}件)`, tooltip: '溶材会議' },
-            ].map(({ key, label, tooltip }) => (
+              { key: 'all',       label: `全銘柄 (${enriched.length}件)`,        icon: '' },
+              { key: 'favorites', label: `お気に入り (${favList.length}件)`,      icon: '★ ' },
+            ].map(({ key, label, icon }) => (
               <button key={key} onClick={() => setFilter(key)} style={{
                 display: 'flex', alignItems: 'center', width: '100%', textAlign: 'left',
                 padding: '7px 10px', marginBottom: 4, fontSize: 12,
                 fontWeight: filter === key ? 700 : 500,
-                background: filter === key ? '#f1f5f9' : 'transparent',
-                color: filter === key ? '#0f172a' : '#64748b',
-                border: 'none', borderRadius: 6, cursor: 'pointer', minHeight: 40,
-              }}>{label}{tooltip && <InfoTooltip id={tooltip}/>}</button>
+                background: filter === key ? (key === 'favorites' ? '#fffbeb' : '#f1f5f9') : 'transparent',
+                color: filter === key ? (key === 'favorites' ? '#b45309' : '#0f172a') : '#64748b',
+                border: filter === key && key === 'favorites' ? '1px solid #fcd34d' : 'none',
+                borderRadius: 6, cursor: 'pointer', minHeight: 40,
+              }}>{icon}{label}</button>
             ))}
             {/* フィルター別MAPE速報 */}
             <div style={{ background: '#f8fafc', borderRadius: 6, padding: '6px 10px', border: '1px solid #e2e8f0', marginTop: 4 }}>
               <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 2 }}>
-                {filter === 'meeting' ? '溶材会議MAPE' : '表示中MAPE'}
+                {filter === 'favorites' ? 'お気に入りMAPE' : '表示中MAPE'}
               </div>
               <div style={{ fontSize: 16, fontWeight: 700, color: mapeColor(displayedMape) }}>
                 {fmtMape(displayedMape)}
@@ -1615,29 +1622,36 @@ function VariantA() {
           {/* 選択中の銘柄パネル */}
           {selectedMaterial && (
             <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '12px', border: '1px solid #bae6fd' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#0ea5e9', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>選択中の銘柄</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 8 }}>{selectedMaterial.code}</div>
-              <div style={{ fontSize: 11, marginBottom: 4 }}>
-                <span style={{ color: '#64748b' }}>MAPE: </span>
-                {skuMape != null ? (
-                  <b style={{ color: mapeColor(skuMape), fontSize: 14 }}>{fmtMape(skuMape)}</b>
-                ) : (
-                  <span style={{ color: '#94a3b8' }}>—</span>
-                )}
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#0ea5e9', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>
+                選択中 {displayedIdx >= 0 ? `(${displayedIdx+1}/${displayed.length})` : ''}
               </div>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>
-                {filter === 'meeting' ? '溶材会議' : '全体'}MAPE: {fmtMape(displayedMape)}
-                {skuMape != null && (
-                  <span style={{ color: skuMape < (displayedMape || globalMape) ? '#15803d' : '#dc2626', marginLeft: 4 }}>
-                    ({skuMape < (displayedMape || globalMape) ? '↑良好' : '↓低精度'})
-                  </span>
-                )}
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a', marginBottom: 6, lineHeight: 1.3 }}>{selectedMaterial.code}</div>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+                <button onClick={navPrev} disabled={displayedIdx <= 0} style={{
+                  flex: 1, padding: '4px 0', fontSize: 13, fontWeight: 700, borderRadius: 6,
+                  background: '#f1f5f9', border: 'none', cursor: displayedIdx <= 0 ? 'default' : 'pointer',
+                  color: displayedIdx <= 0 ? '#cbd5e1' : '#0f172a',
+                }}>◀ 前へ</button>
+                <button onClick={navNext} disabled={displayedIdx < 0 || displayedIdx >= displayed.length - 1} style={{
+                  flex: 1, padding: '4px 0', fontSize: 13, fontWeight: 700, borderRadius: 6,
+                  background: '#f1f5f9', border: 'none',
+                  cursor: (displayedIdx < 0 || displayedIdx >= displayed.length - 1) ? 'default' : 'pointer',
+                  color: (displayedIdx < 0 || displayedIdx >= displayed.length - 1) ? '#cbd5e1' : '#0f172a',
+                }}>次へ ▶</button>
               </div>
+              <button onClick={() => toggleFavorite(selectedMaterial.sku)} style={{
+                width: '100%', marginBottom: 6, padding: '5px 0', borderRadius: 6, fontSize: 12, fontWeight: 700,
+                cursor: 'pointer', border: `1.5px solid ${favorites.has(selectedMaterial.sku) ? '#f59e0b' : '#e2e8f0'}`,
+                background: favorites.has(selectedMaterial.sku) ? '#fffbeb' : '#fff',
+                color: favorites.has(selectedMaterial.sku) ? '#b45309' : '#64748b',
+              }}>
+                {favorites.has(selectedMaterial.sku) ? '★ お気に入り解除' : '☆ お気に入り登録'}
+              </button>
               <button onClick={() => setSelectedSku(null)} style={{
                 fontSize: 11, padding: '4px 10px', borderRadius: 6,
                 background: '#fff', border: '1px solid #bae6fd',
                 color: '#0ea5e9', cursor: 'pointer', width: '100%', fontWeight: 600,
-              }}>選択解除</button>
+              }}>← 一覧に戻る</button>
             </div>
           )}
 
@@ -1661,37 +1675,76 @@ function VariantA() {
           <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '14px 16px' }}>
             {selectedMaterial ? (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
-                    {selectedMaterial.code} — 月次予測（消費量 kg）
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span style={{
-                      background: skuMape != null && skuMape >= 50 ? '#fef2f2' : '#f8fafc',
-                      border: `1px solid ${skuMape != null && skuMape >= 50 ? '#fca5a5' : '#e2e8f0'}`,
-                      borderRadius: 6, padding: '4px 10px', fontSize: 12,
+                {/* ── 材料名 大見出しバナー ── */}
+                <div style={{
+                  background: 'linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%)',
+                  borderRadius: 10, padding: '14px 18px', marginBottom: 12,
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10,
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 10, color: '#7dd3fc', fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 4 }}>
+                      選択銘柄 {displayedIdx >= 0 ? `（${displayedIdx + 1} / ${displayed.length}）` : ''}
+                    </div>
+                    <div style={{
+                      fontSize: isMobile ? 22 : 32, fontWeight: 900, color: '#fff',
+                      letterSpacing: '0.02em', lineHeight: 1.1, wordBreak: 'break-all',
                     }}>
-                      MAPE:&nbsp;
-                      {skuMape != null ? (
-                        <b style={{ fontSize: 16, color: mapeColor(skuMape) }}>{fmtMape(skuMape)}</b>
-                      ) : (
-                        <b style={{ color: '#94a3b8' }}>—</b>
-                      )}
-                      {skuMape == null && skuCV != null && (
-                        <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>変動係数: {skuCV}%</span>
-                      )}
-                      <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4 }}>（直近9ヶ月HO）</span>
-                    </span>
-                    <span style={{ fontSize: 11, color: '#94a3b8', padding: '4px 8px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6 }}>
-                      {filter === 'meeting' ? '溶材会議' : '全体'}MAPE: <b style={{ color: mapeColor(displayedMape) }}>{fmtMape(displayedMape)}</b>
-                      {skuMape != null && displayedMape != null && (
-                        <span style={{ marginLeft: 4, color: skuMape < displayedMape ? '#15803d' : '#dc2626' }}>
-                          {skuMape < displayedMape
-                            ? `（+${(displayedMape - skuMape).toFixed(0)}pt 良好）`
-                            : `（−${(skuMape - displayedMape).toFixed(0)}pt 低精度）`}
-                        </span>
-                      )}
-                    </span>
+                      {selectedMaterial.code}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 11, color: '#94a3b8' }}>
+                        {selectedMaterial.brand}
+                        {selectedMaterial.diameter ? ` ／ φ${selectedMaterial.diameter}mm` : ''}
+                        {selectedMaterial.form ? ` ／ ${selectedMaterial.form}kg` : ''}
+                      </span>
+                      <span style={{
+                        background: skuMape != null && skuMape >= 50 ? '#7f1d1d' : '#1e293b',
+                        border: `1px solid ${skuMape != null && skuMape >= 50 ? '#fca5a5' : '#334155'}`,
+                        borderRadius: 6, padding: '2px 8px', fontSize: 11,
+                      }}>
+                        MAPE:&nbsp;
+                        {skuMape != null ? (
+                          <b style={{ fontSize: 14, color: mapeColor(skuMape) }}>{fmtMape(skuMape)}</b>
+                        ) : (
+                          <b style={{ color: '#475569' }}>—</b>
+                        )}
+                        <span style={{ fontSize: 9, color: '#475569', marginLeft: 4 }}>（HO9M）</span>
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                    {/* お気に入りトグル */}
+                    <button onClick={() => toggleFavorite(selectedMaterial.sku)} style={{
+                      fontSize: 22, background: favorites.has(selectedMaterial.sku) ? '#f59e0b' : 'rgba(255,255,255,0.1)',
+                      border: `2px solid ${favorites.has(selectedMaterial.sku) ? '#f59e0b' : 'rgba(255,255,255,0.2)'}`,
+                      borderRadius: 8, width: 44, height: 44, cursor: 'pointer', lineHeight: 1,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: favorites.has(selectedMaterial.sku) ? '#fff' : '#94a3b8',
+                    }} title={favorites.has(selectedMaterial.sku) ? 'お気に入り解除' : 'お気に入り登録'}>
+                      {favorites.has(selectedMaterial.sku) ? '★' : '☆'}
+                    </button>
+                    {/* 前へ/次へ */}
+                    <button onClick={navPrev} disabled={displayedIdx <= 0} style={{
+                      fontSize: 16, fontWeight: 700, background: 'rgba(255,255,255,0.1)',
+                      border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8,
+                      color: displayedIdx <= 0 ? '#334155' : '#93c5fd',
+                      width: 44, height: 44, cursor: displayedIdx <= 0 ? 'default' : 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>◀</button>
+                    <button onClick={navNext} disabled={displayedIdx < 0 || displayedIdx >= displayed.length - 1} style={{
+                      fontSize: 16, fontWeight: 700, background: 'rgba(255,255,255,0.1)',
+                      border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8,
+                      color: (displayedIdx < 0 || displayedIdx >= displayed.length - 1) ? '#334155' : '#93c5fd',
+                      width: 44, height: 44, cursor: (displayedIdx < 0 || displayedIdx >= displayed.length - 1) ? 'default' : 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>▶</button>
+                    {/* 戻るボタン */}
+                    <button onClick={() => setSelectedSku(null)} style={{
+                      fontSize: 12, fontWeight: 700, background: 'rgba(255,255,255,0.1)',
+                      border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8,
+                      color: '#93c5fd', padding: '0 12px', height: 44, cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}>← 一覧</button>
                   </div>
                 </div>
                 {/* 最終決定量パネル */}
@@ -1744,8 +1797,8 @@ function VariantA() {
                   <b> 在庫シミュレーション（カラーライン）</b>: 初期状態=Lv1（発注なし）で、現在庫から月次消費を差し引いた在庫推移。ボタンで発注倍率を変更可 ／
                   <b> 95%CI（水色帯）</b>: MAPE×1.96σを用いた予測誤差範囲
                 </div>
-                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS} finalDecision={finalDecision}/>
-                <OrderRationalePanel material={selectedMaterial} ships={SHIPS} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
+                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={showShips ? SHIPS : []} finalDecision={finalDecision}/>
+                <OrderRationalePanel material={selectedMaterial} ships={showShips ? SHIPS : []} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
                 <MapeHistoryChart material={selectedMaterial} globalMapeByMonth={globalMapeByMonth}/>
                 <AccuracyFactorsPanel material={selectedMaterial} globalMape={displayedMape}/>
               </>
@@ -1756,7 +1809,7 @@ function VariantA() {
                   全銘柄合計の月別消費量予測（青）と、在庫管理表に記録された実績消費量（グレー破線）の比較。
                   水色帯はMAPEから算出した95%信頼区間。表示中フィルターに応じてMAPEが連動します。
                 </div>
-                <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={displayedMape || globalMape} ships={SHIPS} highlightMonths={chartMonths}/>
+                <ForecastChart series={series} months={months} skus={rawSkus} mape_pct={displayedMape || globalMape} ships={showShips ? SHIPS : []} highlightMonths={chartMonths}/>
               </>
             )}
           </div>
@@ -1766,7 +1819,7 @@ function VariantA() {
             <div style={{ padding: '12px 16px', borderBottom: '1px solid #e2e8f0',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>
-                {filter === 'meeting' ? `溶材会議 一覧${meetingSkus.length > 0 ? `（納品書: ${meetingFile || ''}）` : ''}` : '全材料在庫一覧'}
+                {filter === 'favorites' ? '★ お気に入り銘柄一覧' : '全材料在庫一覧'}
                 <span style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginLeft: 8 }}>{displayed.length}銘柄</span>
                 {inactiveCount > 0 && (
                   <span style={{ fontSize: 11, color: '#a16207', background: '#fef9c3', borderRadius: 6, padding: '1px 8px', marginLeft: 8, fontWeight: 600 }}>
@@ -1786,6 +1839,11 @@ function VariantA() {
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr>
+                    <th style={{
+                      padding: '9px 8px', fontSize: 11, fontWeight: 600, color: '#64748b',
+                      borderBottom: '2px solid #e2e8f0', background: '#fafafa',
+                      whiteSpace: 'nowrap', position: 'sticky', top: 50, zIndex: 2, width: 36, textAlign: 'center',
+                    }}>★</th>
                     <th style={{
                       padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
                       borderBottom: '2px solid #e2e8f0', background: '#fafafa',
@@ -1828,6 +1886,16 @@ function VariantA() {
                         outlineOffset: -1,
                         opacity: isInactive ? 0.45 : 1,
                       }}>
+                        <td style={{ padding: '4px 6px', textAlign: 'center' }}>
+                          <button onClick={() => toggleFavorite(m.sku)} style={{
+                            fontSize: 18, background: 'none', border: 'none',
+                            cursor: 'pointer', padding: '2px 4px',
+                            color: favorites.has(m.sku) ? '#f59e0b' : '#cbd5e1',
+                            lineHeight: 1,
+                          }} title={favorites.has(m.sku) ? 'お気に入り解除' : 'お気に入り登録'}>
+                            {favorites.has(m.sku) ? '★' : '☆'}
+                          </button>
+                        </td>
                         <td style={{ padding: '6px 8px', textAlign: 'center' }}>
                           <button onClick={() => setSelectedSku(isSel ? null : m.sku)} style={{
                             padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
