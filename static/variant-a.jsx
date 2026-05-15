@@ -333,15 +333,19 @@ const SIM_LABELS = ['発注なし', '50%', '推奨通り', '150%', '200%'];
 const SIM_COLORS = ['#94a3b8', '#f59e0b', '#22c55e', '#f97316', '#ef4444'];
 
 function SkuForecastChart({ material, months, mape_pct, ships }) {
-  const W = 900, H = 210, PL = 68, PR = 20, PT = 22, PB = 40;
+  const W = 900, H = 215, PL = 68, PR = 20, PT = 22, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
   const fcArr = material.monthlyForecastArr || [];
   const stArr = material.monthlyStockArr || [];
   const orderArr = material.monthlyOrderArr || [];
   const [simLevel, setSimLevel] = useState(1);
+  const [visible, setVisible] = useState({ fc: true, sim: true, st: true, ci: true, stockCi: true });
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const svgRef = useRef(null);
   const simColor = SIM_COLORS[simLevel - 1];
+  const toggleVis = (k) => setVisible(v => ({ ...v, [k]: !v[k] }));
 
-  // シミュレーション在庫: 現在庫 から消費を引き、発注倍率分を補充
+  // シミュレーション在庫 (期待値消費ベース)
   const simStock = useMemo(() => {
     const mult = SIM_MULT[simLevel - 1];
     let s = material.current;
@@ -352,29 +356,78 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
   }, [material, simLevel]);
 
   const ci = useMemo(() => computeCI(fcArr, mape_pct), [material, mape_pct]);
+
+  // 在庫95%CI: 消費が上限(最悪)・下限(最良)で推移した場合のシミュレーション在庫
+  const simStockCI = useMemo(() => {
+    if (!ci.length) return { worst: [], best: [] };
+    const mult = SIM_MULT[simLevel - 1];
+    let sw = material.current, sb = material.current;
+    const worst = [], best = [];
+    fcArr.forEach((_, i) => {
+      sw = sw - (ci[i].upper || 0) + mult * (orderArr[i] || 0);
+      sb = sb - (ci[i].lower || 0) + mult * (orderArr[i] || 0);
+      worst.push(Math.max(0, sw));
+      best.push(Math.max(0, sb));
+    });
+    return { worst, best };
+  }, [material, simLevel, ci]);
+
   const maxV = useMemo(() => {
-    const all = [...fcArr, ...stArr.filter(v => v != null), ...simStock, ...ci.map(c => c.upper)];
+    const all = [
+      ...fcArr, ...stArr.filter(v => v != null), ...simStock,
+      ...simStockCI.best, ...ci.map(c => c.upper),
+    ];
     return Math.max(...all, 1);
-  }, [fcArr, stArr, simStock, ci]);
+  }, [fcArr, stArr, simStock, simStockCI, ci]);
+
   if (!months || months.length < 2) return null;
   const sx = makeXMapper(months, PL, iW);
   const sy = (v) => PT + (1 - Math.min(Math.max(v, 0), maxV) / maxV) * iH;
   const fmtK = (v) => v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v/1e3)}K` : `${Math.round(v)}`;
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map(t => ({ v: t * maxV, y: PT + (1 - t) * iH }));
+
   const fcPoly = fcArr.map((v, i) => `${sx(months[i])},${sy(v)}`).join(' ');
   const stPts = stArr.map((v, i) => v != null ? [sx(months[i]), sy(v)] : null).filter(Boolean);
   const stPoly = stPts.map(([x, y]) => `${x},${y}`).join(' ');
-  const simPts = simStock.map((v, i) => months[i] ? [sx(months[i]), sy(v)] : null).filter(Boolean);
+  const simPts = simStock.map((v, i) => [sx(months[i]), sy(v)]);
   const simPoly = simPts.map(([x, y]) => `${x},${y}`).join(' ');
-  const upperPts = fcArr.map((_, i) => [sx(months[i]), sy(ci[i].upper)]);
-  const lowerPts = fcArr.map((_, i) => [sx(months[i]), sy(ci[i].lower)]).reverse();
-  const ciPoly = [...upperPts, ...lowerPts].map(([x, y]) => `${x},${y}`).join(' ');
+  const ciPoly = [
+    ...fcArr.map((_, i) => [sx(months[i]), sy(ci[i].upper)]),
+    ...fcArr.map((_, i) => [sx(months[i]), sy(ci[i].lower)]).reverse(),
+  ].map(([x, y]) => `${x},${y}`).join(' ');
+  const stockCiPoly = [
+    ...simStockCI.best.map((v, i) => [sx(months[i]), sy(v)]),
+    ...simStockCI.worst.map((v, i) => [sx(months[i]), sy(v)]).reverse(),
+  ].map(([x, y]) => `${x},${y}`).join(' ');
+
   const activeShips = enrichShips(ships, months[0], months[months.length - 1]);
   const finalSimStock = simStock[simStock.length - 1];
+
+  // Hover: nearest month from mouse position in SVG coordinates
+  const handleMouseMove = (e) => {
+    const el = svgRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const mx = ((e.clientX - rect.left) / rect.width) * W;
+    if (mx < PL || mx > W - PR) { setHoverIdx(null); return; }
+    let ci2 = 0, cd = Infinity;
+    months.forEach((ym, i) => { const d = Math.abs(sx(ym) - mx); if (d < cd) { cd = d; ci2 = i; } });
+    setHoverIdx(ci2);
+  };
+
+  // Legend definition
+  const LEGEND = [
+    { k: 'fc',      label: '予測消費量',         type: 'line',  color: '#0ea5e9' },
+    { k: 'sim',     label: `在庫(${SIM_LABELS[simLevel-1]})`, type: 'line', color: simColor, dash: simLevel > 1 },
+    { k: 'stockCi', label: '在庫95%CI',           type: 'band',  color: '#22c55e' },
+    { k: 'st',      label: 'パイプライン予測在庫', type: 'dash',  color: '#22c55e' },
+    { k: 'ci',      label: '消費95%CI',           type: 'band',  color: '#0ea5e9' },
+  ];
+
   return (
     <div>
       {/* 発注シミュレーター */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 11, color: '#475569', fontWeight: 700, whiteSpace: 'nowrap', marginRight: 2 }}>発注シミュレーター:</span>
         {[1,2,3,4,5].map(lv => (
           <button key={lv} onClick={() => setSimLevel(lv)} style={{
@@ -382,11 +435,8 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
             cursor: 'pointer', border: '1.5px solid',
             background: simLevel === lv ? SIM_COLORS[lv-1] : '#f8fafc',
             color: simLevel === lv ? '#fff' : '#64748b',
-            borderColor: simLevel === lv ? SIM_COLORS[lv-1] : '#e2e8f0',
-            minHeight: 30,
-          }}>
-            Lv{lv} {SIM_LABELS[lv-1]}
-          </button>
+            borderColor: simLevel === lv ? SIM_COLORS[lv-1] : '#e2e8f0', minHeight: 30,
+          }}>Lv{lv} {SIM_LABELS[lv-1]}</button>
         ))}
         {finalSimStock != null && (
           <span style={{ marginLeft: 6, fontSize: 11, color: '#64748b' }}>
@@ -394,76 +444,172 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
           </span>
         )}
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+
+      {/* 凡例（クリックで表示切替） */}
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 5, alignItems: 'center' }}>
+        <span style={{ fontSize: 9, color: '#94a3b8', fontWeight: 700, letterSpacing: '.05em' }}>凡例クリックで切替:</span>
+        {LEGEND.map(({ k, label, type, color, dash }) => (
+          <button key={k} onClick={() => toggleVis(k)} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '2px 8px', borderRadius: 999, fontSize: 10, fontWeight: 600,
+            cursor: 'pointer',
+            border: `1.5px solid ${visible[k] ? color : '#e2e8f0'}`,
+            background: visible[k] ? `${color}18` : '#f8fafc',
+            color: visible[k] ? color : '#94a3b8',
+            textDecoration: visible[k] ? 'none' : 'line-through',
+            transition: 'all 0.12s',
+          }}>
+            {type === 'band' ? (
+              <span style={{ display:'inline-block', width:12, height:7, borderRadius:2,
+                background: color, opacity: visible[k] ? 0.35 : 0.1 }}/>
+            ) : (
+              <svg width={14} height={6} style={{ display:'block' }}>
+                <line x1={0} y1={3} x2={14} y2={3} stroke={visible[k] ? color : '#cbd5e1'}
+                  strokeWidth={2} strokeDasharray={dash ? '4 2' : undefined}/>
+              </svg>
+            )}
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`}
+        style={{ width: '100%', height: 'auto', display: 'block', cursor: 'crosshair' }}
+        onMouseMove={handleMouseMove} onMouseLeave={() => setHoverIdx(null)}>
+
+        {/* Grid */}
         {yTicks.map((t, i) => (
           <g key={i}>
-            <line x1={PL} y1={t.y} x2={W - PR} y2={t.y} stroke="#f1f5f9" strokeWidth={1}/>
-            <text x={PL - 6} y={t.y + 4} textAnchor="end" fontSize={10} fill="#94a3b8">{fmtK(t.v)}</text>
+            <line x1={PL} y1={t.y} x2={W-PR} y2={t.y} stroke="#f1f5f9" strokeWidth={1}/>
+            <text x={PL-6} y={t.y+4} textAnchor="end" fontSize={10} fill="#94a3b8">{fmtK(t.v)}</text>
           </g>
         ))}
+
+        {/* 建造・荷積み帯 */}
         {activeShips.map(ship => {
           const c1 = sx(ship.constructYM < months[0] ? months[0] : ship.constructYM);
           const c2 = sx(ship.loadYM > months[months.length-1] ? months[months.length-1] : ship.loadYM);
           const col = vColor(ship.vessel);
           return (
             <g key={ship.id}>
-              <rect x={c1} y={PT} width={Math.max(1, c2 - c1)} height={iH} fill={col} fillOpacity={0.035} stroke="none"/>
-              <line x1={c2} y1={PT} x2={c2} y2={PT + iH} stroke={col} strokeWidth={1} strokeOpacity={0.3} strokeDasharray="3 3"/>
+              <rect x={c1} y={PT} width={Math.max(1,c2-c1)} height={iH} fill={col} fillOpacity={0.035}/>
+              <line x1={c2} y1={PT} x2={c2} y2={PT+iH} stroke={col} strokeWidth={1} strokeOpacity={0.3} strokeDasharray="3 3"/>
             </g>
           );
         })}
-        {fcArr.length > 1 && (
+
+        {/* ① 消費の95%CIシェード */}
+        {fcArr.length > 1 && visible.ci && (
           <>
-            <polygon points={ciPoly} fill="#0ea5e9" fillOpacity={0.11} stroke="none"/>
-            <polyline points={fcArr.map((_, i) => `${sx(months[i])},${sy(ci[i].upper)}`).join(' ')}
-              fill="none" stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.35} strokeDasharray="3 2"/>
-            <polyline points={fcArr.map((_, i) => `${sx(months[i])},${sy(ci[i].lower)}`).join(' ')}
-              fill="none" stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.35} strokeDasharray="3 2"/>
+            <polygon points={ciPoly} fill="#0ea5e9" fillOpacity={0.10}/>
+            <polyline points={fcArr.map((_,i)=>`${sx(months[i])},${sy(ci[i].upper)}`).join(' ')}
+              fill="none" stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.3} strokeDasharray="3 2"/>
+            <polyline points={fcArr.map((_,i)=>`${sx(months[i])},${sy(ci[i].lower)}`).join(' ')}
+              fill="none" stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.3} strokeDasharray="3 2"/>
           </>
         )}
-        {stPoly && stPts.length > 1 && (
+
+        {/* ② 在庫95%CIシェード (消費が上振れ/下振れした場合の在庫変動幅) */}
+        {simStock.length > 1 && visible.stockCi && (
+          <>
+            <polygon points={stockCiPoly} fill="#16a34a" fillOpacity={0.12}/>
+            <polyline points={simStockCI.worst.map((v,i)=>`${sx(months[i])},${sy(v)}`).join(' ')}
+              fill="none" stroke="#16a34a" strokeWidth={0.9} strokeOpacity={0.45} strokeDasharray="3 2"/>
+            <polyline points={simStockCI.best.map((v,i)=>`${sx(months[i])},${sy(v)}`).join(' ')}
+              fill="none" stroke="#16a34a" strokeWidth={0.9} strokeOpacity={0.45} strokeDasharray="3 2"/>
+          </>
+        )}
+
+        {/* パイプライン予測在庫（破線） */}
+        {stPoly && stPts.length > 1 && visible.st && (
           <>
             <polyline points={stPoly} fill="none" stroke="#22c55e" strokeWidth={1} strokeDasharray="5 2" strokeOpacity={0.5}/>
-            {stPts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={2} fill="#22c55e" opacity={0.5}/>)}
+            {stPts.map(([x,y],i) => <circle key={i} cx={x} cy={y} r={2} fill="#22c55e" opacity={0.5}/>)}
           </>
         )}
+
         {/* シミュレーション在庫ライン */}
-        {simPoly && simPts.length > 1 && (
+        {simPts.length > 1 && visible.sim && (
           <>
             <polyline points={simPoly} fill="none" stroke={simColor} strokeWidth={2.5}
-              strokeDasharray={simLevel === 3 ? 'none' : '7 3'}/>
-            {simPts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r={3} fill={simColor}/>)}
+              strokeDasharray={simLevel > 1 ? '7 3' : undefined}/>
+            {simPts.map(([x,y],i) => (
+              <circle key={i} cx={x} cy={y} r={hoverIdx===i ? 5 : 3} fill={simColor}
+                style={{ transition: 'r 0.1s' }}/>
+            ))}
           </>
         )}
-        {fcArr.length > 1 && (
+
+        {/* 予測消費量（青） */}
+        {fcArr.length > 1 && visible.fc && (
           <>
             <polygon points={`${sx(months[0])},${PT+iH} ${fcPoly} ${sx(months[months.length-1])},${PT+iH}`}
               fill="#0ea5e9" fillOpacity={0.06}/>
             <polyline points={fcPoly} fill="none" stroke="#0ea5e9" strokeWidth={2.5} strokeLinejoin="round"/>
-            {fcArr.map((v, i) => <circle key={i} cx={sx(months[i])} cy={sy(v)} r={3.5} fill="#0ea5e9"/>)}
+            {fcArr.map((v,i) => (
+              <circle key={i} cx={sx(months[i])} cy={sy(v)} r={hoverIdx===i ? 5.5 : 3.5} fill="#0ea5e9"
+                style={{ transition: 'r 0.1s' }}/>
+            ))}
           </>
         )}
-        {months.filter((_, i) => i % 2 === 0 || i === months.length - 1).map(ym => (
-          <text key={ym} x={sx(ym)} y={H - 6} textAnchor="middle" fontSize={9} fill="#94a3b8">
-            {ym.replace('-', '/')}
+
+        {/* ホバー縦線 + ツールチップ */}
+        {hoverIdx != null && months[hoverIdx] && (() => {
+          const hx = sx(months[hoverIdx]);
+          const fc  = fcArr[hoverIdx] || 0;
+          const sim = simStock[hoverIdx] ?? 0;
+          const ciU = ci[hoverIdx]?.upper ?? fc;
+          const ciL = ci[hoverIdx]?.lower ?? fc;
+          const scW = simStockCI.worst[hoverIdx] ?? sim;
+          const scB = simStockCI.best[hoverIdx] ?? sim;
+          const rows = [
+            { label: months[hoverIdx].replace('-','/'), val: null, hdr: true },
+            { label: '予測消費量', val: `${fmtK(fc)} kg`, color: '#60a5fa' },
+            { label: '在庫(シミュ)', val: `${fmtK(sim)} kg`, color: simColor },
+            { label: '消費95%上限', val: `${fmtK(ciU)} kg`, color: '#94a3b8' },
+            { label: '消費95%下限', val: `${fmtK(ciL)} kg`, color: '#94a3b8' },
+            { label: '在庫・最悪', val: `${fmtK(scW)} kg`, color: '#4ade80' },
+            { label: '在庫・最良', val: `${fmtK(scB)} kg`, color: '#4ade80' },
+          ];
+          const TW = 186, TH = rows.length * 15 + 12;
+          const tx = hx + 10 + TW > W - PR ? hx - TW - 8 : hx + 10;
+          const ty = Math.max(PT + 2, Math.min(PT + iH - TH - 2, sy(sim) - TH / 2));
+          return (
+            <g style={{ pointerEvents: 'none' }}>
+              <line x1={hx} y1={PT} x2={hx} y2={PT+iH}
+                stroke="#475569" strokeWidth={1} strokeDasharray="4 2" opacity={0.65}/>
+              {visible.fc && <circle cx={hx} cy={sy(fc)} r={5.5} fill="#0ea5e9" opacity={0.95}
+                stroke="#fff" strokeWidth={1.5}/>}
+              {visible.sim && <circle cx={hx} cy={sy(sim)} r={5.5} fill={simColor} opacity={0.95}
+                stroke="#fff" strokeWidth={1.5}/>}
+              <rect x={tx} y={ty} width={TW} height={TH} rx={6}
+                fill="#1e293b" fillOpacity={0.94}/>
+              {rows.map((r, ri) => r.hdr ? (
+                <text key={ri} x={tx+10} y={ty+14+ri*15} fontSize={11} fill="#7dd3fc" fontWeight={700}>
+                  {r.label}
+                </text>
+              ) : (
+                <text key={ri} x={tx+10} y={ty+14+ri*15} fontSize={10} fill="#e2e8f0">
+                  <tspan fill="#94a3b8">{r.label}　</tspan>
+                  <tspan fill={r.color} fontWeight={600}>{r.val}</tspan>
+                </text>
+              ))}
+            </g>
+          );
+        })()}
+
+        {/* 軸 */}
+        <line x1={PL} y1={PT} x2={PL} y2={PT+iH} stroke="#e2e8f0" strokeWidth={1}/>
+        <line x1={PL} y1={PT+iH} x2={W-PR} y2={PT+iH} stroke="#e2e8f0" strokeWidth={1}/>
+        {months.filter((_,i) => i%2===0 || i===months.length-1).map(ym => (
+          <text key={ym} x={sx(ym)} y={H-6} textAnchor="middle" fontSize={9} fill="#94a3b8">
+            {ym.replace('-','/')}
           </text>
         ))}
-        <line x1={PL} y1={PT} x2={PL} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
-        <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
-        <circle cx={PL+10} cy={PT-7} r={3.5} fill="#0ea5e9"/>
-        <text x={PL+16} y={PT-4} fontSize={9} fill="#475569">予測消費量</text>
-        <line x1={PL+76} y1={PT-7} x2={PL+92} y2={PT-7} stroke={simColor} strokeWidth={2}
-          strokeDasharray={simLevel === 3 ? 'none' : '5 2'}/>
-        <text x={PL+95} y={PT-4} fontSize={9} fill="#475569">在庫(シミュレ:{SIM_LABELS[simLevel-1]})</text>
-        <line x1={PL+218} y1={PT-7} x2={PL+232} y2={PT-7} stroke="#22c55e" strokeWidth={1} strokeDasharray="4 2" strokeOpacity={0.6}/>
-        <text x={PL+235} y={PT-4} fontSize={9} fill="#94a3b8">パイプライン予測在庫</text>
-        <rect x={PL+335} y={PT-13} width={12} height={9}
-          fill="#0ea5e9" fillOpacity={0.2} stroke="#0ea5e9" strokeWidth={0.5} strokeOpacity={0.5} rx={1}/>
-        <text x={PL+349} y={PT-4} fontSize={9} fill="#475569">95%CI</text>
       </svg>
       <ShipTimeline ships={ships} allYms={months} PL={PL} PR={PR}/>
       {fcArr.length > 0 && ci.length > 0 && (
-        <CINote fcVal0={fcArr[0]} ci0={ci[0]} ciLast={ci[ci.length - 1]}/>
+        <CINote fcVal0={fcArr[0]} ci0={ci[0]} ciLast={ci[ci.length-1]}/>
       )}
     </div>
   );
