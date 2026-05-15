@@ -52,40 +52,51 @@ function fmtMape(pct) {
 // ──── ヘルプツールチップ ────
 // クリックで表示/非表示。ラベル横の ❓ボタンに適用する。
 const HELP_TEXTS = {
-  グラフ表示月数: '在庫推移グラフに表示する予測月数（3/6/9/12）を選択します。月数を増やすと長期の在庫枯渇リスクを把握しやすくなります。',
-  予測開始月: '在庫グラフの表示開始月を選択します。未来月を選ぶと特定の造船スケジュール前後の在庫状況を確認できます。',
-  在庫健全性スコア: '余力（現在庫 − 月間消費）を月間消費で割った比率で 1〜5 評価。評価3（適正）は余力が月間消費の2.0倍。評価1〜2 は危険域のため早急な発注が必要です。',
-  評価3発注量: '評価3（適正）を達成するために必要な即時発注量。計算式: 月間消費 × 3.0 − 現在庫。マイナスになる場合（在庫十分）は 0 表示。',
-  MAPE: '予測精度の指標（Mean Absolute Percentage Error）。実績と予測の乖離率の平均値。20%未満=高精度（緑）、50%以上=要警戒（赤）。ホールドアウト検証で算出。',
-  アラート閾値: '残日数が「危険閾値」を下回ると赤ステータス、「注意閾値」を下回ると黄ステータスになります。リードタイムに合わせて設定してください。',
-  溶材会議: '新来島ドック納品表に記載された銘柄のみを表示します。納品表とデータが自動照合され、板継用・全姿勢用も独立した行として表示されます。',
-  パイプライン予測在庫: 'ALS（交互最小二乗法）による船種別需要分解 + 竣工スケジュールから算出した月末予測在庫量。実際の発注量（確定分）を加味したシミュレーション結果です。',
+  グラフ表示月数: '在庫推移グラフに表示する予測月数（3 / 6 / 9 / 12）を選択します。\n月数を増やすと長期の在庫枯渇リスクを把握しやすくなります。例えば12か月表示にすることで、半年後の危険水域への到達も事前に確認できます。',
+  予測開始月: '在庫グラフの表示開始月を選択します。\n未来月を選ぶと特定の造船スケジュール前後の在庫状況を重点的に確認できます。「先頭に戻す」で当月起点に戻せます。',
+  在庫健全性スコア: '余力（現在庫 − 月間消費）を月間消費で割った比率で 1〜5 評価します。\n評価3が「適正在庫ライン（目標）」で、急な需要増にも耐えられる安全在庫を保持している状態です。\n評価1〜2は危険域のため早急な発注が必要です。評価4〜5は過剰在庫の可能性があります。',
+  評価3発注量: '評価3（適正）を達成するために必要な即時発注量。\n計算式: 月間消費 × 3.0 − 現在庫\nグラフ期間末尾でスコア3を維持するには、この量に期間内消費の累計を加算した発注量が必要です。',
+  MAPE: '予測精度の指標（Mean Absolute Percentage Error）。実績と予測の乖離率の平均値。\n目安: 20%未満=高精度（緑）、20〜50%=通常（橙）、50%以上=要警戒（赤）。\nホールドアウト検証（直近9か月）で算出しています。',
+  アラート閾値: '残日数が「危険閾値」を下回ると赤ステータス、「注意閾値」を下回ると黄ステータスになります。\nリードタイム（発注から入荷までの日数）に合わせて設定してください。例: リードタイム90日なら危険閾値を90に設定。',
+  パイプライン予測在庫: '現在の在庫に、発注済みの入荷予定分を加味した将来の在庫推移です。\n二重発注を防ぐための指標として活用してください。\n\n「予測在庫（現有分のみ）」との違い: こちらは現時点の在庫を消費だけで消化した場合の推移です。一方「予測在庫（入荷予定込み）」は確定発注分の入荷を加算しているため、実態に近い在庫見通しになります。\n\n技術詳細: ALS（交互最小二乗法）による船種別需要分解 + 竣工スケジュールから算出。',
 };
 
 function InfoTooltip({ id }) {
   const [open, setOpen] = React.useState(false);
+  const [coord, setCoord] = React.useState({ top: 0, left: 0 });
+  const btnRef = React.useRef(null);
   const text = HELP_TEXTS[id];
   if (!text) return null;
+
+  const handleClick = (e) => {
+    e.stopPropagation();
+    if (!open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      const left = Math.max(8, Math.min(r.left, (window.innerWidth || 800) - 320));
+      const top = r.bottom + 6;
+      setCoord({ top, left });
+    }
+    setOpen(o => !o);
+  };
+
   return (
-    <span style={{ position: 'relative', display: 'inline-block', verticalAlign: 'middle', marginLeft: 3 }}>
-      <button
-        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
-        style={{
-          background: open ? '#0ea5e9' : '#e0f2fe', border: 'none', borderRadius: '50%',
-          width: 14, height: 14, fontSize: 9, fontWeight: 700, lineHeight: '14px',
-          color: open ? '#fff' : '#0369a1', cursor: 'pointer', padding: 0,
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        }}
-        title={id}
-      >?</button>
+    <span style={{ display: 'inline-block', verticalAlign: 'middle', marginLeft: 3 }}>
+      <button ref={btnRef} onClick={handleClick} style={{
+        background: open ? '#0ea5e9' : '#e0f2fe', border: 'none', borderRadius: '50%',
+        width: 16, height: 16, fontSize: 10, fontWeight: 700,
+        color: open ? '#fff' : '#0369a1', cursor: 'pointer', padding: 0,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }} title={`${id} のヘルプ`}>?</button>
       {open && (
         <div style={{
-          position: 'absolute', left: 0, top: 18, zIndex: 999, width: 240,
-          background: '#1e293b', color: '#f0f9ff', fontSize: 11, lineHeight: 1.6,
-          borderRadius: 8, padding: '10px 12px', boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-          pointerEvents: 'none',
+          position: 'fixed', left: coord.left, top: coord.top,
+          zIndex: 9999, width: 300, maxWidth: 'calc(100vw - 20px)',
+          background: '#1e293b', color: '#f0f9ff', fontSize: 11, lineHeight: 1.7,
+          borderRadius: 10, padding: '12px 14px', boxShadow: '0 12px 40px rgba(0,0,0,0.55)',
+          whiteSpace: 'pre-wrap',
         }}>
-          <div style={{ fontWeight: 700, marginBottom: 4, color: '#7dd3fc' }}>{id}</div>
+          <div style={{ fontWeight: 700, marginBottom: 6, color: '#7dd3fc', fontSize: 12, borderBottom: '1px solid #334155', paddingBottom: 6 }}>{id}</div>
           {text}
         </div>
       )}
@@ -433,11 +444,11 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) 
 
   // Legend definition
   const LEGEND = [
-    { k: 'fc',      label: '予測消費量',         type: 'line',  color: '#0ea5e9' },
-    { k: 'sim',     label: `在庫(${SIM_LABELS[simLevel-1]})`, type: 'line', color: simColor, dash: simLevel > 1 },
-    { k: 'stockCi', label: '在庫95%CI',           type: 'band',  color: '#22c55e' },
-    { k: 'st',      label: 'パイプライン予測在庫', type: 'dash',  color: '#22c55e' },
-    { k: 'ci',      label: '消費95%CI',           type: 'band',  color: '#0ea5e9' },
+    { k: 'fc',      label: '予測消費量',                       type: 'line', color: '#0ea5e9' },
+    { k: 'sim',     label: `予測在庫（現有分のみ / ${SIM_LABELS[simLevel-1]}）`, type: 'line', color: simColor, dash: simLevel > 1 },
+    { k: 'stockCi', label: '在庫95%CI',                        type: 'band', color: '#22c55e' },
+    { k: 'st',      label: '予測在庫（入荷予定込み）',          type: 'dash', color: '#22c55e' },
+    { k: 'ci',      label: '消費95%CI',                        type: 'band', color: '#0ea5e9' },
     ...(finalDecision != null ? [{ k: 'fd', label: `最終決定量(${fmt(Math.round(finalDecision))}kg)`, type: 'line', color: '#f59e0b', dash: false }] : []),
   ];
 
@@ -1535,20 +1546,43 @@ function VariantA() {
             )}
           </div>
 
-          {/* 在庫健全性スコア説明 */}
+          {/* 在庫健全性スコア説明（縦型） */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>
-              在庫健全性スコア (1〜5)<InfoTooltip id="在庫健全性スコア"/>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>
+              在庫健全性スコア<InfoTooltip id="在庫健全性スコア"/>
             </div>
-            <div style={{ fontSize: 10, color: '#475569', lineHeight: 1.6 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {[
+                { score: 1, label: '在庫切れ / 危険',  color: '#dc2626', bg: '#fee2e2', border: '#fca5a5', formula: '余力 ≤ 月消費 × 1.0', action: '即時発注が必要' },
+                { score: 2, label: '注意',              color: '#b45309', bg: '#fef3c7', border: '#fde68a', formula: '余力 ≤ 月消費 × 1.5', action: '早めの手配を推奨' },
+                { score: 3, label: '適正（目標値）',   color: '#15803d', bg: '#dcfce7', border: '#4ade80', formula: '余力 ≤ 月消費 × 2.0', action: '適正在庫ライン', target: true },
+                { score: 4, label: '余裕',              color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd', formula: '余力 ≤ 月消費 × 2.5', action: '十分な余裕あり' },
+                { score: 5, label: '過剰',              color: '#1e40af', bg: '#eff6ff', border: '#bfdbfe', formula: '余力 > 月消費 × 2.5', action: '過剰在庫に注意' },
+              ].map(({ score, label, color, bg, border, formula, action, target }) => (
+                <div key={score} style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  background: target ? bg : '#fafafa',
+                  border: `${target ? 2 : 1}px solid ${target ? border : '#e2e8f0'}`,
+                  borderRadius: 7, padding: '6px 8px',
+                }}>
+                  <span style={{
+                    width: 24, height: 24, borderRadius: 6,
+                    background: bg, border: `2px solid ${color}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 13, fontWeight: 900, color, flexShrink: 0,
+                  }}>{score}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color, lineHeight: 1.2 }}>
+                      {label}{target ? ' ★' : ''}
+                    </div>
+                    <div style={{ fontSize: 9, color: '#64748b', marginTop: 1 }}>{formula}</div>
+                    <div style={{ fontSize: 9, color: target ? '#15803d' : '#94a3b8', fontWeight: target ? 600 : 400 }}>{action}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 9, color: '#94a3b8', marginTop: 6, borderTop: '1px solid #e2e8f0', paddingTop: 5 }}>
               余力 = 現在庫 − 月間消費<br/>
-              <span style={{ color: '#dc2626', fontWeight: 600 }}>評価1</span>: 余力≤月消費×1.0<br/>
-              <span style={{ color: '#b45309', fontWeight: 600 }}>評価2</span>: ×1.5 &nbsp;
-              <span style={{ color: '#15803d', fontWeight: 600 }}>評価3(適正)</span>: ×2.0<br/>
-              <span style={{ color: '#1d4ed8', fontWeight: 600 }}>評価4</span>: ×2.5 &nbsp;
-              <span style={{ color: '#1d4ed8', fontWeight: 600 }}>評価5</span>: ×3.0+<br/>
-            </div>
-            <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
               評価3達成発注量 = 月消費×3.0 − 現在庫
             </div>
           </div>
@@ -1791,11 +1825,28 @@ function VariantA() {
                   )}
                 </div>
 
-                {/* グラフ説明: 月次予測と在庫シミュレーション */}
-                <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
-                  <b>消費量予測（青）</b>: 建造スケジュールと過去実績から推定した月別使用量 kg ／
-                  <b> 在庫シミュレーション（カラーライン）</b>: 初期状態=Lv1（発注なし）で、現在庫から月次消費を差し引いた在庫推移。ボタンで発注倍率を変更可 ／
-                  <b> 95%CI（水色帯）</b>: MAPE×1.96σを用いた予測誤差範囲
+                {/* グラフ説明 */}
+                <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 4, lineHeight: 1.6 }}>
+                  <b style={{ color: '#0ea5e9' }}>消費量予測（青）</b>: 建造スケジュールと過去実績から推定した月別使用量 ／
+                  <b style={{ color: '#22c55e' }}> 予測在庫（現有分のみ・カラーライン）</b>: 現在庫から月次消費を差し引いた推移 ／
+                  <b style={{ color: '#0ea5e9' }}> 95%CI（水色帯）</b>: MAPE×1.96σの予測誤差範囲
+                </div>
+                {/* パイプライン予測在庫 解説ボックス */}
+                <div style={{
+                  background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8,
+                  padding: '8px 12px', marginBottom: 6, fontSize: 10, lineHeight: 1.65,
+                  display: 'flex', alignItems: 'flex-start', gap: 8,
+                }}>
+                  <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>📦</span>
+                  <div>
+                    <b style={{ color: '#15803d', fontSize: 11 }}>
+                      予測在庫（入荷予定込み）とは
+                      <InfoTooltip id="パイプライン予測在庫"/>
+                    </b>
+                    <span style={{ color: '#166534', marginLeft: 4 }}>
+                      現在の在庫に、発注済みの入荷予定分を加味した将来の在庫推移です。<b>二重発注を防ぐための指標</b>として活用してください。グラフ上の緑破線がこれに該当します。
+                    </span>
+                  </div>
                 </div>
                 <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={showShips ? SHIPS : []} finalDecision={finalDecision}/>
                 <OrderRationalePanel material={selectedMaterial} ships={showShips ? SHIPS : []} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
