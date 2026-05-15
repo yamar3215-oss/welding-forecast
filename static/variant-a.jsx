@@ -356,32 +356,71 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) 
   const simColor = SIM_COLORS[simLevel - 1];
   const toggleVis = (k) => setVisible(v => ({ ...v, [k]: !v[k] }));
 
-  // シミュレーション在庫 (期待値消費ベース)
+  const ci = useMemo(() => computeCI(fcArr, mape_pct), [material, mape_pct]);
+
+  // ── Lv3「推奨通り」の自動計算 ──
+  // 目標: グラフ末尾でスコア3（月間消費×3.0）を達成し、かつ欠品しない最小発注量を期首一括発注
+  const lv3OrderQty = useMemo(() => {
+    const totalFc = fcArr.reduce((s, v) => s + Math.max(0, v || 0), 0);
+    // Score 3 達成: 期末在庫 = monthly × 3.0 → 必要発注量
+    const score3Req = Math.max(0, material.monthly * 3.0 - material.current + totalFc);
+    // 欠品防止: 期間中どの時点でも在庫≥0 (累積消費の最大値がcurrentを超えない量)
+    let cumFc = 0, maxCumFc = 0;
+    for (const fc of fcArr) { cumFc += Math.max(0, fc || 0); maxCumFc = Math.max(maxCumFc, cumFc); }
+    const stockoutMin = Math.max(0, maxCumFc - material.current);
+    // 両方の条件を満たす最小量
+    return Math.round(Math.max(score3Req, stockoutMin));
+  }, [material, fcArr]);
+
+  // シミュレーション在庫
   const simStock = useMemo(() => {
+    if (simLevel === 3) {
+      // Lv3: 自動計算した推奨発注量を期首に一括追加
+      let s = material.current + lv3OrderQty;
+      return fcArr.map((fc) => { s = Math.max(0, s - (fc || 0)); return s; });
+    }
     const mult = SIM_MULT[simLevel - 1];
     let s = material.current;
     return fcArr.map((fc, i) => {
       s = s - (fc || 0) + mult * (orderArr[i] || 0);
       return Math.max(0, s);
     });
-  }, [material, simLevel]);
+  }, [material, simLevel, lv3OrderQty, fcArr, orderArr]);
 
-  const ci = useMemo(() => computeCI(fcArr, mape_pct), [material, mape_pct]);
-
-  // 在庫95%CI: 消費が上限(最悪)・下限(最良)で推移した場合のシミュレーション在庫
+  // 在庫95%CI
   const simStockCI = useMemo(() => {
     if (!ci.length) return { worst: [], best: [] };
-    const mult = SIM_MULT[simLevel - 1];
-    let sw = material.current, sb = material.current;
     const worst = [], best = [];
-    fcArr.forEach((_, i) => {
-      sw = sw - (ci[i].upper || 0) + mult * (orderArr[i] || 0);
-      sb = sb - (ci[i].lower || 0) + mult * (orderArr[i] || 0);
-      worst.push(Math.max(0, sw));
-      best.push(Math.max(0, sb));
-    });
+    if (simLevel === 3) {
+      let sw = material.current + lv3OrderQty, sb = material.current + lv3OrderQty;
+      fcArr.forEach((_, i) => {
+        sw = Math.max(0, sw - (ci[i].upper || 0));
+        sb = Math.max(0, sb - (ci[i].lower || 0));
+        worst.push(sw); best.push(sb);
+      });
+    } else {
+      const mult = SIM_MULT[simLevel - 1];
+      let sw = material.current, sb = material.current;
+      fcArr.forEach((_, i) => {
+        sw = Math.max(0, sw - (ci[i].upper || 0) + mult * (orderArr[i] || 0));
+        sb = Math.max(0, sb - (ci[i].lower || 0) + mult * (orderArr[i] || 0));
+        worst.push(sw); best.push(sb);
+      });
+    }
     return { worst, best };
-  }, [material, simLevel, ci]);
+  }, [material, simLevel, ci, lv3OrderQty, fcArr, orderArr]);
+
+  // 欠品警告: シミュレーション在庫が途中でゼロになる月があるか
+  const hasStockout = useMemo(() => {
+    if (simLevel === 3) return false; // Lv3は欠品しない設計
+    const mult = SIM_MULT[simLevel - 1];
+    let s = material.current;
+    for (let i = 0; i < fcArr.length; i++) {
+      s = s - (fcArr[i] || 0) + mult * (orderArr[i] || 0);
+      if (s < 0) return true;
+    }
+    return false;
+  }, [material, simLevel, fcArr, orderArr]);
 
   // 最終決定量での在庫シミュレーション (発注量を month[0] に加算)
   const finalDecisionStock = useMemo(() => {
@@ -445,7 +484,7 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) 
   // Legend definition
   const LEGEND = [
     { k: 'fc',      label: '予測消費量',                       type: 'line', color: '#0ea5e9' },
-    { k: 'sim',     label: `予測在庫（現有分のみ / ${SIM_LABELS[simLevel-1]}）`, type: 'line', color: simColor, dash: simLevel > 1 },
+    { k: 'sim',     label: simLevel === 3 ? `予測在庫（現有分のみ / 推奨：${fmt(lv3OrderQty)}kg発注）` : `予測在庫（現有分のみ / ${SIM_LABELS[simLevel-1]}）`, type: 'line', color: simColor, dash: simLevel > 1 },
     { k: 'stockCi', label: '在庫95%CI',                        type: 'band', color: '#22c55e' },
     { k: 'st',      label: '予測在庫（入荷予定込み）',          type: 'dash', color: '#22c55e' },
     { k: 'ci',      label: '消費95%CI',                        type: 'band', color: '#0ea5e9' },
@@ -458,20 +497,47 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) 
       <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 11, color: '#475569', fontWeight: 700, whiteSpace: 'nowrap', marginRight: 2 }}>発注シミュレーター:</span>
         {[1,2,3,4,5].map(lv => (
-          <button key={lv} onClick={() => setSimLevel(lv)} style={{
-            padding: '4px 9px', borderRadius: 6, fontSize: 11, fontWeight: 700,
-            cursor: 'pointer', border: '1.5px solid',
-            background: simLevel === lv ? SIM_COLORS[lv-1] : '#f8fafc',
-            color: simLevel === lv ? '#fff' : '#64748b',
-            borderColor: simLevel === lv ? SIM_COLORS[lv-1] : '#e2e8f0', minHeight: 30,
-          }}>Lv{lv} {SIM_LABELS[lv-1]}</button>
+          <div key={lv} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            <button onClick={() => setSimLevel(lv)} style={{
+              padding: '4px 9px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+              cursor: 'pointer', border: '1.5px solid',
+              background: simLevel === lv ? SIM_COLORS[lv-1] : '#f8fafc',
+              color: simLevel === lv ? '#fff' : '#64748b',
+              borderColor: simLevel === lv ? SIM_COLORS[lv-1] : '#e2e8f0', minHeight: 30,
+            }}>Lv{lv} {SIM_LABELS[lv-1]}</button>
+            {lv === 3 && (
+              <span style={{ fontSize: 8, fontWeight: 700, color: '#15803d', whiteSpace: 'nowrap' }}>
+                推奨：{fmt(lv3OrderQty)}kg
+              </span>
+            )}
+          </div>
         ))}
         {finalSimStock != null && (
           <span style={{ marginLeft: 6, fontSize: 11, color: '#64748b' }}>
-            → 期末在庫(推定): <b style={{ color: simColor }}>{fmt(Math.round(finalSimStock))} kg</b>
+            → 期末在庫: <b style={{ color: simColor }}>{fmt(Math.round(finalSimStock))} kg</b>
+            {simLevel === 3 && (
+              <span style={{ marginLeft: 6, fontSize: 10, color: '#15803d', fontWeight: 600 }}>
+                （スコア3目標値: {fmt(Math.round(score3Threshold))} kg）
+              </span>
+            )}
           </span>
         )}
       </div>
+      {/* 欠品警告バナー */}
+      {hasStockout && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: '#fef2f2', border: '1.5px solid #fca5a5', borderRadius: 8,
+          padding: '6px 12px', marginBottom: 6, fontSize: 11,
+        }}>
+          <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
+          <span style={{ color: '#dc2626', fontWeight: 700 }}>欠品リスク:</span>
+          <span style={{ color: '#7f1d1d' }}>
+            現在の発注量（Lv{simLevel}）では期間中に在庫が底をつく月があります。
+            <b style={{ marginLeft: 4 }}>Lv3「推奨通り」</b> に切り替えると自動で {fmt(lv3OrderQty)} kg の適正発注量を計算します。
+          </span>
+        </div>
+      )}
 
       {/* 凡例（クリックで表示切替） */}
       <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 5, alignItems: 'center' }}>
