@@ -1178,6 +1178,7 @@ function VariantA() {
   const [finalDecision, setFinalDecision] = useState(null);
   const [finalDecisionMsg, setFinalDecisionMsg] = useState('');
   const [targetMonthIdx, setTargetMonthIdx] = useState(4); // 0-indexed into months[]
+  const [showDecisionModal, setShowDecisionModal] = useState(false);
   const [showShips, setShowShips] = useState(false);  // 船表情報の表示/非表示 (デフォルト: 非表示)
   // お気に入り: localStorage永続化
   const [favorites, setFavorites] = useState(() => {
@@ -1507,7 +1508,7 @@ ${shipNote}
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
-    { label: `${targetMonthLabel}時点でスコア3を達成するために必要な量`, value: fmt(score3OrderQty) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: score3OrderQty > 0 ? '#b45309' : '#15803d' },
+    { label: `${targetMonthLabel}時点でスコア3を達成するために必要な量`, value: fmt(score3OrderQty) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: score3OrderQty > 0 ? '#b45309' : '#15803d', special: 'score3' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
@@ -1883,12 +1884,38 @@ ${shipNote}
 
           {/* KPIカード */}
           <div style={{ display: 'grid', gridTemplateColumns: kpiCols, gap: 12 }}>
-            {kpiCards.map(({ label, value, unit, color }) => (
-              <div key={label} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '14px 18px' }}>
-                <div style={{ fontSize: 11, color: '#64748b', fontWeight: 500, marginBottom: 6 }}>{label}</div>
-                <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
-                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{unit}</div>
-              </div>
+            {kpiCards.map(({ label, value, unit, color, special }) => (
+              special === 'score3' ? (
+                <div key={label} style={{
+                  background: '#fff', border: '2px solid #fde68a', borderRadius: 12, padding: '14px 18px',
+                  boxShadow: '0 2px 12px rgba(245,158,11,0.12)',
+                }}>
+                  <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 800, marginBottom: 2 }}>予測発注量</div>
+                  <div style={{ fontSize: 10, color: '#92400e', marginBottom: 8, lineHeight: 1.4 }}>
+                    （{targetMonthLabel}に健全在庫スコア3を達成するための計算値）
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                    <button
+                      onClick={() => setShowDecisionModal(true)}
+                      style={{
+                        background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                        color: '#fff', border: 'none', borderRadius: 8,
+                        padding: '8px 18px', fontWeight: 800, fontSize: 14,
+                        cursor: 'pointer', boxShadow: '0 3px 10px rgba(14,165,233,0.45)',
+                        whiteSpace: 'nowrap', letterSpacing: '.02em',
+                      }}
+                    >📋 発注</button>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>{unit}</div>
+                </div>
+              ) : (
+                <div key={label} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '14px 18px' }}>
+                  <div style={{ fontSize: 11, color: '#64748b', fontWeight: 500, marginBottom: 6 }}>{label}</div>
+                  <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{unit}</div>
+                </div>
+              )
             ))}
           </div>
 
@@ -2251,6 +2278,122 @@ ${shipNote}
 
         </main>
       </div>
+
+      {/* ── 発注モーダル ── */}
+      {showDecisionModal && (
+        <div
+          onClick={() => setShowDecisionModal(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 10000,
+            background: 'rgba(15,23,42,0.65)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            backdropFilter: 'blur(2px)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#fff', borderRadius: 18, padding: '28px 32px',
+              boxShadow: '0 24px 64px rgba(0,0,0,0.4)', maxWidth: 460, width: '90vw',
+            }}
+          >
+            {/* ヘッダー */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: '#0f172a', marginBottom: 4 }}>
+                  溶材会議 最終決定量
+                </div>
+                <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.5 }}>
+                  {selectedMaterial?.code}
+                  <span style={{ marginLeft: 10, color: '#92400e', fontWeight: 700 }}>
+                    推奨: {fmt(score3OrderQty)} kg
+                  </span>
+                  <span style={{ marginLeft: 4, fontSize: 11, color: '#94a3b8' }}>
+                    （{targetMonthLabel}スコア3達成）
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowDecisionModal(false)}
+                style={{
+                  background: '#f1f5f9', border: 'none', borderRadius: 8,
+                  width: 32, height: 32, fontSize: 16, cursor: 'pointer',
+                  color: '#64748b', fontWeight: 700, flexShrink: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}
+              >✕</button>
+            </div>
+
+            {/* 入力エリア */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#475569', marginBottom: 6 }}>
+                発注量 (kg)
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="number" min={0} step={1}
+                  value={finalDecisionInput}
+                  onChange={e => setFinalDecisionInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { handleFinalDecision(); setShowDecisionModal(false); }
+                    if (e.key === 'Escape') setShowDecisionModal(false);
+                  }}
+                  placeholder={`推奨: ${fmt(score3OrderQty)}`}
+                  autoFocus
+                  style={{
+                    flex: 1, padding: '12px 14px', borderRadius: 10,
+                    border: '2px solid #0ea5e9', fontSize: 20, fontWeight: 800,
+                    textAlign: 'right', outline: 'none', color: '#0f172a',
+                  }}
+                />
+                <span style={{ fontSize: 15, fontWeight: 700, color: '#475569', whiteSpace: 'nowrap' }}>kg</span>
+              </div>
+              {/* 推奨量を自動入力するリンク */}
+              <div style={{ marginTop: 6, textAlign: 'right' }}>
+                <button
+                  onClick={() => setFinalDecisionInput(String(score3OrderQty))}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    fontSize: 11, color: '#0ea5e9', fontWeight: 600, textDecoration: 'underline',
+                  }}
+                >推奨量 {fmt(score3OrderQty)} kg を入力</button>
+              </div>
+            </div>
+
+            {/* ボタン */}
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={() => { handleFinalDecision(); setShowDecisionModal(false); }}
+                style={{
+                  flex: 1, padding: '13px', borderRadius: 10, fontSize: 16, fontWeight: 900,
+                  background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                  color: '#fff', border: 'none', cursor: 'pointer',
+                  boxShadow: '0 4px 14px rgba(14,165,233,0.4)',
+                }}
+              >✓ 確定・グラフ反映</button>
+              <button
+                onClick={() => setShowDecisionModal(false)}
+                style={{
+                  padding: '13px 20px', borderRadius: 10, fontSize: 14, fontWeight: 700,
+                  background: '#f1f5f9', color: '#64748b', border: 'none', cursor: 'pointer',
+                }}
+              >キャンセル</button>
+            </div>
+
+            {/* フィードバック */}
+            {finalDecisionMsg && (
+              <div style={{
+                marginTop: 12, padding: '8px 12px', borderRadius: 8,
+                background: finalDecisionMsg.startsWith('✓') ? '#f0fdf4' : '#fef2f2',
+                color: finalDecisionMsg.startsWith('✓') ? '#15803d' : '#dc2626',
+                fontSize: 12, fontWeight: 700, textAlign: 'center',
+              }}>
+                {finalDecisionMsg}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
