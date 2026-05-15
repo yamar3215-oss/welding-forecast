@@ -222,18 +222,55 @@ def convert_to_dict(
     if actual_path is not None and Path(actual_path).exists():
         actual_df = read_inventory(str(actual_path))
         if len(actual_df) > 0:
+            # 在庫評価は1〜5のみ有効 (将来予定行に注文量が混入するため)
+            _EVAL_OK = (actual_df["在庫評価"].notna()
+                        & (actual_df["在庫評価"] >= 1)
+                        & (actual_df["在庫評価"] <= 5))
+            # SKU別の在庫・評価情報を収集
+            _inv_info: dict[str, dict] = {}
             for sku_id, grp in actual_df.groupby("sku_id"):
                 stock_rows = grp[(grp["在庫"].notna()) & (grp["在庫"] > 0)].sort_values("year_month")
-                eval_rows = grp[grp["在庫評価"].notna()].sort_values("year_month")
+                eval_rows = grp[_EVAL_OK & (grp.index.isin(grp.index))].sort_values("year_month")
                 current = float(stock_rows.iloc[-1]["在庫"]) if len(stock_rows) > 0 else None
                 latest_eval = eval_rows.iloc[-1] if len(eval_rows) > 0 else None
-                for rec in sku_records:
-                    if rec["sku"] == sku_id:
-                        rec["current_stock_kg"] = current
-                        if latest_eval is not None:
-                            rec["stock_evaluation_yama"] = int(latest_eval["在庫評価"])
-                            rec["stock_evaluation_ym"] = str(latest_eval["year_month"])
+                _inv_info[sku_id] = {
+                    "current": current,
+                    "eval": int(latest_eval["在庫評価"]) if latest_eval is not None else None,
+                    "eval_ym": str(latest_eval["year_month"]) if latest_eval is not None else None,
+                }
+
+            # 板継用・全姿勢用を親SKUに集約 (パイプラインが親SKUで予測する場合の補完)
+            _USAGE_SFXS = ("_板継用", "_全姿勢用")
+            _base_stock: dict[str, float] = {}
+            _base_eval: dict[str, tuple] = {}
+            for sid, info in _inv_info.items():
+                for sfx in _USAGE_SFXS:
+                    if sid.endswith(sfx):
+                        base = sid[: -len(sfx)]
+                        if info["current"] is not None:
+                            _base_stock[base] = _base_stock.get(base, 0.0) + info["current"]
+                        if info["eval"] is not None:
+                            cur = _base_eval.get(base)
+                            if cur is None or info["eval"] < cur[0]:
+                                _base_eval[base] = (info["eval"], info["eval_ym"])
                         break
+
+            for rec in sku_records:
+                sid = rec["sku"]
+                if sid in _inv_info and _inv_info[sid]["current"] is not None:
+                    # 完全一致
+                    info = _inv_info[sid]
+                    rec["current_stock_kg"] = info["current"]
+                    if info["eval"] is not None:
+                        rec["stock_evaluation_yama"] = info["eval"]
+                        rec["stock_evaluation_ym"] = info["eval_ym"]
+                elif sid in _base_stock:
+                    # 板継用+全姿勢用を合算して親SKUに割り当て
+                    rec["current_stock_kg"] = round(_base_stock[sid], 1)
+                    if sid in _base_eval:
+                        ev, eym = _base_eval[sid]
+                        rec["stock_evaluation_yama"] = ev
+                        rec["stock_evaluation_ym"] = eym
             by_ym = actual_df.groupby("year_month")["出庫"].sum()
             for ym, val in by_ym.items():
                 actual_series[str(ym)] = float(val)

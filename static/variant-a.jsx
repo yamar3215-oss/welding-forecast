@@ -470,41 +470,104 @@ function OrderRationalePanel({ material, ships, months }) {
   );
 }
 
+// ──── 予測精度向上ロジック説明パネル ────
+function AccuracyFactorsPanel({ material, globalMape }) {
+  const mape = material ? material.mapePct : globalMape;
+  const factors = [
+    {
+      icon: '🚢',
+      title: '船種別補正 (ALS行列分解)',
+      body: '各船種の溶材消費パターンを交互最小二乗法 (ALS) で学習。ケミカル船・タンカー・バルカー等の消費係数を自動推定し、竣工スケジュールと掛け合わせて月別需要を予測します。',
+      color: '#1d4ed8',
+    },
+    {
+      icon: '📅',
+      title: '季節性パターン (月次行列)',
+      body: '年間12ヶ月の季節係数を学習データから抽出。工事繁忙期（造船スケジュール集中期）や稼働月数の変動を補正し、単純移動平均より精度の高い予測を実現します。',
+      color: '#7c3aed',
+    },
+    {
+      icon: '📈',
+      title: 'データ蓄積効果 (学習曲線 α=0.35)',
+      body: `実績データが増えるほど係数推定の精度が向上します。現在の学習月数18ヶ月を基点に、さらに12ヶ月蓄積するとMAPEは約${mape != null ? Math.round(mape * (1 - Math.pow(18/(18+12), 0.35))) : '—'}%ポイント改善する見込みです（学習曲線モデル）。`,
+      color: '#0891b2',
+    },
+    {
+      icon: '⚙️',
+      title: '外れ値制約と在庫評価照合',
+      body: '月次予測に在庫評価スコア（1〜5段階）との整合チェックを適用。大きく乖離した予測値を制約して実態に沿った結果を維持します。制約MAPE=全銘柄の重み付き平均。',
+      color: '#15803d',
+    },
+  ];
+  return (
+    <div style={{ marginTop: 14, background: '#f8fafc', borderRadius: 8,
+      border: '1px solid #e2e8f0', padding: '12px 14px' }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 10 }}>
+        予測精度向上ロジック
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
+        {factors.map((f, i) => (
+          <div key={i} style={{ background: '#fff', borderRadius: 6, padding: '8px 10px',
+            border: `1px solid ${f.color}28`, borderLeft: `3px solid ${f.color}` }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: f.color, marginBottom: 4 }}>
+              {f.icon} {f.title}
+            </div>
+            <div style={{ fontSize: 10, color: '#475569', lineHeight: 1.55 }}>{f.body}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ──── MAPEトレンド + 将来学習曲線グラフ ────
-// 学習曲線モデル: MAPE(n) ≈ MAPE_now * (n_now / n)^0.35
-// 実MAPEデータ(mapeByMonth)がある場合はそれを表示、ない場合はシミュレーションのみ
+// X軸: 実際のカレンダー月（〇月形式）、過去=実線(橙)、将来=点線(青)+エリア
+// 閾値ライン: 20%(高精度)・50%(要警戒)、SVGネイティブ日本語ツールチップ
+const _addMtoYm = (ym, n) => {
+  if (!ym || ym.length < 7) return '';
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + n, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
 function MapeHistoryChart({ material, globalMapeByMonth }) {
-  const W = 900, H = 160, PL = 56, PR = 24, PT = 18, PB = 36;
+  const [tooltip, setTooltip] = useState(null);
+  const W = 900, H = 195, PL = 56, PR = 88, PT = 24, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
+
   const currentMape = material.mapePct;
   const mapeByMonth = material.mapeByMonth || {};
   const allGlobal = globalMapeByMonth || {};
 
-  // 学習曲線パラメータ
-  // 現在のトレーニングデータ期間を推定 (FORECAST_DATA.period_startから逆算)
   const fd = window.FORECAST_DATA || {};
   const periodStart = fd.period_start || '';
-  const generatedAt = fd.generated_at || '';
-  // トレーニング期間: periodStart - 18ヶ月分がデータ開始と仮定 (HO 9ヶ月 + 訓練最低9ヶ月)
-  const trainMonthsNow = 18;
 
-  // 実績MAPEデータ (SKU固有またはグローバル月別)
-  const actualMonths = Object.keys(mapeByMonth).length > 0 ? mapeByMonth :
-                       Object.keys(allGlobal).length > 0 ? allGlobal : {};
-  const hasMapeHistory = Object.keys(actualMonths).length > 0;
+  const N_FUTURE = 24, LC_ALPHA = 0.35, trainMonthsNow = 18;
 
-  // 表示する月範囲: 過去12ヶ月〜将来24ヶ月 (from now)
-  // periodStartから逆算して "now" に対応する学習月数を求める
-  const N_PAST = 18, N_FUTURE = 24;
-  // 学習曲線: MAPE(n) = mape_now * (trainMonthsNow / n)^0.35
-  const LC_ALPHA = 0.35;
-  const lcMape = (n) => currentMape != null ? currentMape * Math.pow(trainMonthsNow / Math.max(1, n), LC_ALPHA) : null;
+  // 過去実績データ (SKU固有 > グローバル月別の優先順)
+  const pastData = useMemo(() => {
+    const src = Object.keys(mapeByMonth).length > 0 ? mapeByMonth : allGlobal;
+    return Object.entries(src)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([ym, v]) => ({ ym, v }));
+  }, [material, globalMapeByMonth]);
 
-  // X軸: 学習月数ラベル (過去は実績、将来はシミュレーション)
-  const xPoints = [];
-  for (let i = -N_PAST; i <= N_FUTURE; i += 3) {
-    xPoints.push({ n: trainMonthsNow + i, label: i === 0 ? '現在' : i > 0 ? `+${i}ヶ月` : `${i}ヶ月` });
-  }
+  // 将来シミュレーションデータ (学習曲線モデル)
+  const futureData = useMemo(() => {
+    if (currentMape == null || !periodStart) return [];
+    return Array.from({ length: N_FUTURE + 1 }, (_, i) => ({
+      ym: _addMtoYm(periodStart, i),
+      v: currentMape * Math.pow(trainMonthsNow / Math.max(1, trainMonthsNow + i), LC_ALPHA),
+    }));
+  }, [currentMape, periodStart]);
+
+  // X軸: 過去+将来の全月を結合してソート
+  const allYms = useMemo(() => {
+    const s = new Set([...pastData.map(d => d.ym), ...futureData.map(d => d.ym)]);
+    return [...s].sort();
+  }, [pastData, futureData]);
+
+  const hasMapeHistory = pastData.length > 0;
 
   if (currentMape == null && !hasMapeHistory) {
     return (
@@ -514,42 +577,31 @@ function MapeHistoryChart({ material, globalMapeByMonth }) {
     );
   }
 
-  const n_min = Math.max(1, trainMonthsNow - N_PAST);
-  const n_max = trainMonthsNow + N_FUTURE;
-  // Y軸: 0〜100%
-  const maxY = 100;
+  const nYm = allYms.length;
+  const sx = (ym) => {
+    const idx = allYms.indexOf(ym);
+    return PL + (idx < 0 ? 0 : idx / Math.max(1, nYm - 1)) * iW;
+  };
+  const sy = (pct) => PT + (1 - Math.min(Math.max(pct, 0), 100) / 100) * iH;
 
-  const sx = (n) => PL + ((n - n_min) / (n_max - n_min)) * iW;
-  const sy = (pct) => PT + (1 - Math.min(Math.max(pct, 0), maxY) / maxY) * iH;
-
-  // 将来学習曲線ポイント
-  const futurePts = [];
-  for (let n = trainMonthsNow; n <= n_max; n += 1) {
-    const v = lcMape(n);
-    if (v != null) futurePts.push([sx(n), sy(v)]);
-  }
+  const pastPts  = pastData.map(d  => [sx(d.ym),  sy(d.v),  d.ym,  d.v,  false]);
+  const futurePts = futureData.map(d => [sx(d.ym), sy(d.v), d.ym, d.v, true]);
+  const pastPoly   = pastPts.map(([x, y]) => `${x},${y}`).join(' ');
   const futurePoly = futurePts.map(([x, y]) => `${x},${y}`).join(' ');
+  const areaFill = futurePts.length > 1
+    ? `${futurePts[0][0]},${PT + iH} ${futurePoly} ${futurePts[futurePts.length - 1][0]},${PT + iH}`
+    : '';
 
-  // 過去学習曲線ポイント (シミュレーション)
-  const pastPts = [];
-  for (let n = n_min; n <= trainMonthsNow; n += 1) {
-    const v = lcMape(n);
-    if (v != null) pastPts.push([sx(n), sy(v)]);
-  }
-  const pastPoly = pastPts.map(([x, y]) => `${x},${y}`).join(' ');
+  const xTickStep = nYm > 18 ? 3 : nYm > 9 ? 2 : 1;
+  const thresholds = [
+    { v: 20, label: '高精度 20%', color: '#15803d' },
+    { v: 50, label: '要警戒 50%', color: '#dc2626' },
+  ];
 
-  // 実績データポイント (ある場合)
-  const actualPts = Object.entries(actualMonths).sort(([a], [b]) => a.localeCompare(b)).map(([ym, v], idx) => {
-    // ym → 近似学習月数 (periodStartから逆算: 単純に idx-N_PASTとして描画)
-    const n = n_min + idx * ((N_PAST) / Math.max(1, Object.keys(actualMonths).length - 1));
-    return [sx(n), sy(v), v, ym];
-  });
-
-  const yTicks = [0, 30, 50, 75, 100].map(v => ({ v, y: sy(v) }));
-
-  // 12ヶ月後・24ヶ月後の予測MAPE
-  const mape12 = lcMape(trainMonthsNow + 12);
-  const mape24 = lcMape(trainMonthsNow + 24);
+  const mape12 = currentMape != null
+    ? Math.round(currentMape * Math.pow(trainMonthsNow / (trainMonthsNow + 12), LC_ALPHA)) : null;
+  const mape24 = currentMape != null
+    ? Math.round(currentMape * Math.pow(trainMonthsNow / (trainMonthsNow + 24), LC_ALPHA)) : null;
 
   return (
     <div style={{ marginTop: 10 }}>
@@ -558,90 +610,178 @@ function MapeHistoryChart({ material, globalMapeByMonth }) {
       </div>
       <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
         {hasMapeHistory
-          ? `ホールドアウト検証期間（直近9ヶ月）の月別MAPE実績と、今後データが蓄積された場合の改善予測（学習曲線モデル、α=${LC_ALPHA}）`
-          : `現在のMAPE ${Math.round(currentMape)}% を基点に、今後のデータ蓄積による改善を学習曲線モデル（MAPE∝n^-${LC_ALPHA}）でシミュレーション`
-        }
+          ? 'ホールドアウト検証期間の月別MAPE実績（実線・橙）と、今後のデータ蓄積による改善予測（点線・青、学習曲線 α=0.35）'
+          : `現在のMAPE ${currentMape != null ? Math.round(currentMape) : '—'}% を基点に学習曲線モデルでシミュレーション（α=0.35）`}
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
-        {/* 背景バンド: 良好(緑)/ 注意(黄)/ 要注意(赤) */}
-        <rect x={PL} y={sy(30)} width={iW} height={sy(0) - sy(30)} fill="#dcfce7" fillOpacity={0.4}/>
-        <rect x={PL} y={sy(50)} width={iW} height={sy(30) - sy(50)} fill="#fef9c3" fillOpacity={0.5}/>
-        <rect x={PL} y={sy(100)} width={iW} height={sy(50) - sy(100)} fill="#fee2e2" fillOpacity={0.4}/>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block', overflow: 'visible' }}>
+        <defs>
+          <clipPath id="mc-clip">
+            <rect x={PL} y={PT} width={iW} height={iH}/>
+          </clipPath>
+        </defs>
 
-        {yTicks.map((t, i) => (
-          <g key={i}>
-            <line x1={PL} y1={t.y} x2={W - PR} y2={t.y} stroke="#e2e8f0" strokeWidth={0.8}/>
-            <text x={PL - 4} y={t.y + 3} textAnchor="end" fontSize={9} fill="#94a3b8">{t.v}%</text>
+        {/* 背景バンド: 良好(緑 ≤20%)/ 注意(黄 20-50%)/ 要注意(赤 >50%) */}
+        <rect x={PL} y={sy(20)} width={iW} height={sy(0) - sy(20)} fill="#dcfce7" fillOpacity={0.35}/>
+        <rect x={PL} y={sy(50)} width={iW} height={sy(20) - sy(50)} fill="#fef9c3" fillOpacity={0.5}/>
+        <rect x={PL} y={PT}     width={iW} height={sy(50) - PT}     fill="#fee2e2" fillOpacity={0.35}/>
+
+        {/* Y軸グリッド + ラベル */}
+        {[0, 20, 50, 75, 100].map(v => (
+          <g key={v}>
+            <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="#e2e8f0" strokeWidth={0.8}/>
+            <text x={PL - 4} y={sy(v) + 3.5} textAnchor="end" fontSize={9} fill="#94a3b8">{v}%</text>
           </g>
         ))}
 
-        {/* 「現在」縦線 */}
-        <line x1={sx(trainMonthsNow)} y1={PT} x2={sx(trainMonthsNow)} y2={PT + iH}
-          stroke="#64748b" strokeWidth={1} strokeDasharray="4 3"/>
-        <text x={sx(trainMonthsNow)} y={PT - 4} textAnchor="middle" fontSize={8} fill="#64748b">現在</text>
-
-        {/* 12/24ヶ月後縦線 */}
-        {[12, 24].map(m => (
-          <g key={m}>
-            <line x1={sx(trainMonthsNow + m)} y1={PT} x2={sx(trainMonthsNow + m)} y2={PT + iH}
-              stroke="#94a3b8" strokeWidth={0.7} strokeDasharray="2 3"/>
-            <text x={sx(trainMonthsNow + m)} y={PT - 4} textAnchor="middle" fontSize={8} fill="#94a3b8">+{m}ヶ月</text>
+        {/* 閾値ライン: 20%(高精度・緑)/ 50%(要警戒・赤) */}
+        {thresholds.map(({ v, label, color }) => (
+          <g key={v}>
+            <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)}
+              stroke={color} strokeWidth={1.3} strokeDasharray="6 3" opacity={0.8}/>
+            <text x={W - PR + 4} y={sy(v) + 3.5} fontSize={8} fill={color}>{label}</text>
           </g>
         ))}
 
-        {/* 過去学習曲線 (グレー破線) */}
-        {pastPoly && <polyline points={pastPoly} fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 3"/>}
-
-        {/* 将来学習曲線 (青破線) */}
-        {futurePoly && <polyline points={futurePoly} fill="none" stroke="#0ea5e9" strokeWidth={1.8} strokeDasharray="5 3"/>}
-
-        {/* 実績データポイント */}
-        {actualPts.map(([x, y, v, ym], i) => (
-          <g key={i}>
-            <circle cx={x} cy={y} r={4} fill={mapeColor(v)} stroke="#fff" strokeWidth={1}/>
-            <text x={x} y={y - 7} textAnchor="middle" fontSize={8} fill={mapeColor(v)}>{Math.round(v)}%</text>
-          </g>
-        ))}
-
-        {/* 現在MAPEドット */}
-        {currentMape != null && (
+        {/* 「現在」縦線 (予測開始月の境界) */}
+        {periodStart && allYms.includes(periodStart) && (
           <g>
-            <circle cx={sx(trainMonthsNow)} cy={sy(currentMape)} r={5}
-              fill={mapeColor(currentMape)} stroke="#fff" strokeWidth={1.5}/>
-            <text x={sx(trainMonthsNow) + 8} y={sy(currentMape) + 3} fontSize={10} fontWeight={700}
-              fill={mapeColor(currentMape)}>{Math.round(currentMape)}%</text>
+            <line x1={sx(periodStart)} y1={PT} x2={sx(periodStart)} y2={PT + iH}
+              stroke="#64748b" strokeWidth={1} strokeDasharray="4 3"/>
+            <text x={sx(periodStart)} y={PT - 7} textAnchor="middle" fontSize={8} fill="#64748b">現在</text>
           </g>
         )}
 
-        {/* 12/24ヶ月後の予測値ラベル */}
-        {mape12 != null && (
-          <text x={sx(trainMonthsNow + 12) + 4} y={sy(mape12) - 4} fontSize={9} fill="#0ea5e9">
-            {Math.round(mape12)}%見込
-          </text>
-        )}
-        {mape24 != null && (
-          <text x={sx(trainMonthsNow + 24) + 4} y={sy(mape24) - 4} fontSize={9} fill="#0ea5e9">
-            {Math.round(mape24)}%見込
-          </text>
+        {/* 将来エリア (薄い青) */}
+        {areaFill && (
+          <polygon points={areaFill} fill="#0ea5e9" fillOpacity={0.09} clipPath="url(#mc-clip)"/>
         )}
 
-        <line x1={PL} y1={PT} x2={PL} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
-        <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#e2e8f0" strokeWidth={1}/>
+        {/* 将来学習曲線 (青点線) */}
+        {futurePoly && (
+          <polyline points={futurePoly} fill="none" stroke="#0ea5e9" strokeWidth={2}
+            strokeDasharray="6 3" clipPath="url(#mc-clip)"/>
+        )}
+
+        {/* 過去実績MAPE (橙実線) */}
+        {pastPoly && (
+          <polyline points={pastPoly} fill="none" stroke="#f97316" strokeWidth={2.2}
+            clipPath="url(#mc-clip)"/>
+        )}
+
+        {/* 過去の円ドット (ホバーでツールチップ) */}
+        {pastPts.map(([x, y, ym, v], i) => (
+          <circle key={i} cx={x} cy={y} r={4.5}
+            fill={mapeColor(v)} stroke="#fff" strokeWidth={1.5}
+            style={{ cursor: 'pointer' }}
+            onMouseEnter={() => setTooltip({ x, y, ym, v, isFuture: false })}
+            onMouseLeave={() => setTooltip(null)}/>
+        ))}
+
+        {/* 将来の円ドット (3ヶ月毎に表示) */}
+        {futurePts.filter((_, i) => i % 3 === 0).map(([x, y, ym, v], i) => (
+          <circle key={i} cx={x} cy={y} r={3}
+            fill="#0ea5e9" stroke="#fff" strokeWidth={1} opacity={0.8}
+            style={{ cursor: 'pointer' }}
+            onMouseEnter={() => setTooltip({ x, y, ym, v, isFuture: true })}
+            onMouseLeave={() => setTooltip(null)}/>
+        ))}
+
+        {/* SVGネイティブ日本語ツールチップ */}
+        {tooltip && (() => {
+          const TW = 168;
+          const tx = tooltip.x + 10 + TW > W
+            ? Math.max(PL, tooltip.x - TW - 6) : tooltip.x + 10;
+          const ty = Math.max(tooltip.y - 30, PT + 2);
+          const valTxt = `MAPE ${Math.round(tooltip.v)}%${tooltip.isFuture ? '（予測）' : ''}`;
+          return (
+            <g>
+              <rect x={tx} y={ty} width={TW} height={22} rx={4}
+                fill="#1e293b" fillOpacity={0.92}/>
+              <text x={tx + 8} y={ty + 14.5} fontSize={10} fill="#fff">
+                {fmtYMLabel(tooltip.ym)}：{valTxt}
+              </text>
+            </g>
+          );
+        })()}
+
+        {/* 軸枠 */}
+        <line x1={PL} y1={PT} x2={PL} y2={PT + iH} stroke="#cbd5e1" strokeWidth={1}/>
+        <line x1={PL} y1={PT + iH} x2={W - PR} y2={PT + iH} stroke="#cbd5e1" strokeWidth={1}/>
+
+        {/* X軸目盛 (〇月形式 + 相対月数ラベル) */}
+        {allYms.filter((_, i) => i % xTickStep === 0).map(ym => {
+          const isJan = ym.endsWith('-01');
+          // 現在(periodStart)からの相対月数
+          const relM = periodStart ? (() => {
+            const [py, pm] = periodStart.split('-').map(Number);
+            const [yy, ym2] = ym.split('-').map(Number);
+            return (yy - py) * 12 + (ym2 - pm);
+          })() : null;
+          const relLabel = relM == null ? '' :
+            relM === 0 ? '' :
+            relM < 0 ? `${relM}ヶ月` : `+${relM}ヶ月`;
+          return (
+            <g key={ym}>
+              <line x1={sx(ym)} y1={PT + iH} x2={sx(ym)} y2={PT + iH + 3}
+                stroke="#cbd5e1" strokeWidth={0.8}/>
+              {isJan && (
+                <text x={sx(ym)} y={PT + iH + 12} textAnchor="middle" fontSize={7} fill="#64748b">
+                  {ym.slice(0, 4)}年
+                </text>
+              )}
+              <text x={sx(ym)} y={isJan ? PT + iH + 23 : PT + iH + 13}
+                textAnchor="middle" fontSize={8} fill="#94a3b8">
+                {parseInt(ym.slice(5, 7))}月
+              </text>
+              {relLabel && relM % 6 === 0 && (
+                <text x={sx(ym)} y={isJan ? PT + iH + 34 : PT + iH + 26}
+                  textAnchor="middle" fontSize={7} fill={relM < 0 ? '#f97316' : '#0ea5e9'}>
+                  {relLabel}
+                </text>
+              )}
+            </g>
+          );
+        })}
 
         {/* 凡例 */}
-        <circle cx={PL+8} cy={PT-7} r={3.5} fill={mapeColor(currentMape)}/>
-        <text x={PL+14} y={PT-4} fontSize={8} fill="#475569">現在MAPE</text>
-        <line x1={PL+70} y1={PT-7} x2={PL+82} y2={PT-7} stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="3 2"/>
-        <text x={PL+85} y={PT-4} fontSize={8} fill="#475569">学習曲線(過去)</text>
-        <line x1={PL+165} y1={PT-7} x2={PL+177} y2={PT-7} stroke="#0ea5e9" strokeWidth={1.5} strokeDasharray="4 2"/>
-        <text x={PL+180} y={PT-4} fontSize={8} fill="#475569">将来予測（シミュレーション）</text>
+        <line x1={PL} y1={PT - 10} x2={PL + 14} y2={PT - 10} stroke="#f97316" strokeWidth={2.2}/>
+        <circle cx={PL + 7} cy={PT - 10} r={3} fill="#f97316"/>
+        <text x={PL + 17} y={PT - 6} fontSize={8} fill="#475569">実績MAPE</text>
+        <line x1={PL + 76} y1={PT - 10} x2={PL + 90} y2={PT - 10}
+          stroke="#0ea5e9" strokeWidth={2} strokeDasharray="5 2"/>
+        <circle cx={PL + 83} cy={PT - 10} r={2.5} fill="#0ea5e9" opacity={0.8}/>
+        <text x={PL + 93} y={PT - 6} fontSize={8} fill="#475569">改善予測（学習曲線シミュレーション）</text>
       </svg>
+
+      {/* 精度改善実績サマリー */}
+      {hasMapeHistory && pastData.length >= 2 && (() => {
+        const first = pastData[0], last = pastData[pastData.length - 1];
+        const improvement = first.v - last.v;
+        const nMonths = pastData.length;
+        return (
+          <div style={{ fontSize: 11, color: '#475569', marginTop: 6, background: '#fefce8',
+            borderRadius: 6, padding: '6px 10px', border: '1px solid #fef08a', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            <span>📈 <b>改善実績:</b> {nMonths}ヶ月間で&nbsp;
+              <b style={{ color: improvement > 0 ? '#15803d' : '#dc2626' }}>
+                {improvement > 0 ? '+' : ''}{Math.round(improvement)}%ポイント
+              </b>&nbsp;{improvement > 0 ? '精度向上' : '変動'}
+            </span>
+            <span style={{ color: '#94a3b8' }}>
+              {fmtYMLabel(first.ym)} {Math.round(first.v)}% → {fmtYMLabel(last.ym)} {Math.round(last.v)}%
+            </span>
+          </div>
+        );
+      })()}
       {(mape12 != null || mape24 != null) && (
-        <div style={{ fontSize: 11, color: '#475569', marginTop: 6, background: '#f0f9ff',
+        <div style={{ fontSize: 11, color: '#475569', marginTop: 4, background: '#f0f9ff',
           borderRadius: 6, padding: '6px 10px', border: '1px solid #bae6fd' }}>
-          {mape12 != null && <span>12ヶ月後(データ蓄積): <b style={{ color: mapeColor(mape12) }}>{Math.round(mape12)}%</b>見込 &nbsp;|&nbsp;</span>}
-          {mape24 != null && <span>24ヶ月後: <b style={{ color: mapeColor(mape24) }}>{Math.round(mape24)}%</b>見込 &nbsp;|&nbsp;</span>}
-          <span style={{ color: '#94a3b8' }}>学習曲線モデル（MAPE∝n^-{LC_ALPHA}、経験則ベース） — データ蓄積により精度向上の見込み</span>
+          {mape12 != null && (
+            <span>12ヶ月後 ({fmtYMLabel(_addMtoYm(periodStart, 12))}): <b style={{ color: mapeColor(mape12) }}>{mape12}%</b>見込 &nbsp;|&nbsp;</span>
+          )}
+          {mape24 != null && (
+            <span>24ヶ月後 ({fmtYMLabel(_addMtoYm(periodStart, 24))}): <b style={{ color: mapeColor(mape24) }}>{mape24}%</b>見込 &nbsp;</span>
+          )}
+          <span style={{ color: '#94a3b8' }}>— データ蓄積により精度向上の見込み（学習曲線モデル α=0.35）</span>
         </div>
       )}
     </div>
@@ -704,7 +844,7 @@ function VariantA() {
   // ── 状態 ──
   const [fMonths, setFMonths] = useState(6);       // グラフ表示月数
   const [startOffset, setStartOffset] = useState(0); // グラフ開始月インデックス
-  const [orderMonths, setOrderMonths] = useState(3); // 推奨発注計算月数（1〜6）
+  // 評価3達成発注量 (orderSum) は月間消費×3.0−現在庫で固定算出 (orderMonths設定不要)
   const [dangerT, setDangerT] = useState(15);
   const [cautionT, setCautionT] = useState(35);
   const [orderStatus, setOrderStatus] = useState({});
@@ -732,10 +872,10 @@ function VariantA() {
   // ── 派生データ ──
   const enriched = useMemo(() => MATERIALS.map(m => {
     const status = computeStatus(m, dangerT, cautionT);
-    // orderMonths で推奨発注量を計算（fMonths とは独立）
-    const orderSum = Math.round((m.monthlyOrderArr || []).slice(0, orderMonths).reduce((s, v) => s + (v || 0), 0));
+    // 評価3(適正)達成に必要な即時発注量: 余力=monthly×2.0 → 必要在庫=monthly×3.0
+    const orderSum = Math.max(0, Math.round(m.monthly * 3.0 - m.current));
     return { ...m, status, statusRank: STATUS_RANK[status], orderSum };
-  }), [dangerT, cautionT, orderMonths]);
+  }), [dangerT, cautionT]);
 
   const urgentCount = useMemo(() => enriched.filter(s => s.status === 'risk').length, [enriched]);
   const cautionCount = useMemo(() => enriched.filter(s => s.status === 'caution').length, [enriched]);
@@ -892,7 +1032,7 @@ function VariantA() {
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
-    { label: `推奨発注量（${orderMonths}か月）`, value: fmt(selectedMaterial.orderSum) + ' kg', unit: `MAPE参考: ${fmtMape(displayedMape)}`, color: '#0f172a' },
+    { label: '評価3達成 推奨発注量', value: fmt(selectedMaterial.orderSum) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: selectedMaterial.orderSum > 0 ? '#b45309' : '#15803d' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
@@ -1097,25 +1237,18 @@ function VariantA() {
           {/* 推奨発注計算期間（スライダー: 1〜6か月） */}
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>
-              発注計算期間
+              在庫健全性スコア (1〜5)
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <input
-                type="range" min="1" max="6" step="1" value={orderMonths}
-                onChange={e => setOrderMonths(Number(e.target.value))}
-                style={{ flex: 1, accentColor: '#0ea5e9', cursor: 'pointer' }}
-              />
-              <span style={{
-                minWidth: 36, textAlign: 'center', fontSize: 14, fontWeight: 700,
-                color: '#0f172a', background: '#f1f5f9', borderRadius: 6,
-                padding: '3px 6px',
-              }}>{orderMonths}か月</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8' }}>
-              <span>1か月</span><span>6か月</span>
+            <div style={{ fontSize: 10, color: '#475569', lineHeight: 1.6 }}>
+              余力 = 現在庫 − 月間消費<br/>
+              <span style={{ color: '#dc2626', fontWeight: 600 }}>評価1</span>: 余力≤月消費×1.0<br/>
+              <span style={{ color: '#b45309', fontWeight: 600 }}>評価2</span>: ×1.5 &nbsp;
+              <span style={{ color: '#15803d', fontWeight: 600 }}>評価3(適正)</span>: ×2.0<br/>
+              <span style={{ color: '#1d4ed8', fontWeight: 600 }}>評価4</span>: ×2.5 &nbsp;
+              <span style={{ color: '#1d4ed8', fontWeight: 600 }}>評価5</span>: ×3.0+<br/>
             </div>
             <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
-              推奨発注量・KPIカードに即時反映
+              評価3達成発注量 = 月消費×3.0 − 現在庫
             </div>
           </div>
 
@@ -1275,6 +1408,7 @@ function VariantA() {
                 <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
                 <OrderRationalePanel material={selectedMaterial} ships={SHIPS} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
                 <MapeHistoryChart material={selectedMaterial} globalMapeByMonth={globalMapeByMonth}/>
+                <AccuracyFactorsPanel material={selectedMaterial} globalMape={displayedMape}/>
               </>
             ) : (
               <>
@@ -1323,7 +1457,7 @@ function VariantA() {
                     <ThSort label="現在庫 (kg)" sortKey="current" textAlign="right" {...thProps}/>
                     <ThSort label="残日数" sortKey="daysLeft" {...thProps}/>
                     <ThSort label="月間消費 (kg)" sortKey="monthly" textAlign="right" {...thProps}/>
-                    <ThSort label={`発注推奨 (${orderMonths}か月・kg)`} sortKey="orderSum" textAlign="right" {...thProps}/>
+                    <ThSort label="評価3発注量 (kg)" sortKey="orderSum" textAlign="right" {...thProps}/>
                     <ThSort label="MAPE" sortKey="mapePct" textAlign="center" {...thProps}/>
                     <th style={{
                       padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
@@ -1346,11 +1480,12 @@ function VariantA() {
                     const pct = Math.min(100, Math.max(0, ((m.daysLeft || 0) / (cautionT * 2)) * 100));
                     const isSel = selectedSku === m.sku;
                     const isInactive = inactiveSku.has(m.sku);
+                    const isHighMape = !isInactive && m.mapePct != null && m.mapePct >= 50;
                     return (
                       <tr key={m.sku} style={{
-                        background: isSel ? '#f0f9ff' : i % 2 === 0 ? '#fff' : '#fafafa',
-                        borderBottom: '1px solid #f1f5f9',
-                        outline: isSel ? '2px solid #0ea5e9' : 'none',
+                        background: isSel ? '#f0f9ff' : isHighMape ? '#fff5f5' : i % 2 === 0 ? '#fff' : '#fafafa',
+                        borderBottom: isHighMape ? '1px solid #fecaca' : '1px solid #f1f5f9',
+                        outline: isSel ? '2px solid #0ea5e9' : isHighMape ? '1px solid #fca5a5' : 'none',
                         outlineOffset: -1,
                         opacity: isInactive ? 0.45 : 1,
                       }}>
@@ -1396,7 +1531,25 @@ function VariantA() {
                           </div>
                         </td>
                         <td style={{ padding: '8px 10px', textAlign: 'right', color: '#334155' }}>{fmt(m.monthly)}</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>{fmt(m.orderSum)}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'right' }}>
+                          {(() => {
+                            const hs = m.healthScore;
+                            const hsColor = hs <= 1 ? '#dc2626' : hs <= 2 ? '#b45309' : hs === 3 ? '#15803d' : '#1d4ed8';
+                            const hsLabel = hs <= 1 ? '危' : hs <= 2 ? '注' : hs === 3 ? '適' : '過';
+                            return (
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 5 }}>
+                                <span style={{ fontSize: 9, fontWeight: 700, color: hsColor,
+                                  background: `${hsColor}18`, borderRadius: 4, padding: '1px 4px',
+                                  border: `1px solid ${hsColor}40`, whiteSpace: 'nowrap' }}>
+                                  {hsLabel}{hs}
+                                </span>
+                                <span style={{ fontWeight: 700, color: m.orderSum > 0 ? '#b45309' : '#94a3b8' }}>
+                                  {m.orderSum > 0 ? fmt(m.orderSum) : '—'}
+                                </span>
+                              </div>
+                            );
+                          })()}
+                        </td>
                         {/* MAPE列 */}
                         <td style={{ padding: '8px 10px', textAlign: 'center' }}>
                           <MapeBadge pct={m.mapePct} reason={m.mapeReason}/>

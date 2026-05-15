@@ -62,7 +62,10 @@ function buildMaterials(fd) {
     //   3. それが0なら、最初の非0月次予測在庫を採用 (初月のみ偶然0だが次月以降に立ち上がるケース)
     //   4. 月次予測在庫が全て0 (非アクティブSKU) → ハッシュ合成
     let current;
-    if (s.current_stock_kg != null) {
+    // current_stock_kg=0 かつ予測が存在する (active SKU) の場合は在庫欠損とみなしてフォールスルー
+    const _trustCurrent = s.current_stock_kg != null &&
+      (s.current_stock_kg > 0 || s.total_forecast_12m < 1);
+    if (_trustCurrent) {
       current = Math.round(s.current_stock_kg);
     } else if (s.monthly_stock && s.monthly_stock.length > 0) {
       const ms0 = s.monthly_stock[0];
@@ -73,13 +76,12 @@ function buildMaterials(fd) {
         if (firstNonZero != null) {
           current = Math.round(firstNonZero);
         } else {
-          const factor = 0.3 + (_hash(s.sku) % 320) / 100;
-          current = Math.round(monthly * factor);
+          // 非アクティブSKU (予測ゼロ) はハッシュ合成せず 0 とする
+          current = s.has_real_forecast ? Math.round(monthly * (0.3 + (_hash(s.sku) % 320) / 100)) : 0;
         }
       }
     } else {
-      const factor = 0.3 + (_hash(s.sku) % 320) / 100;
-      current = Math.round(monthly * factor);
+      current = s.has_real_forecast ? Math.round(monthly * (0.3 + (_hash(s.sku) % 320) / 100)) : 0;
     }
     // 残日数: 現在庫 ÷ 月間消費 × 30 (直感的な消費ペース基準)
     const daysLeft = monthly > 0 ? Math.round((current / monthly) * 30) : 999;
@@ -88,6 +90,8 @@ function buildMaterials(fd) {
     const stockEvalArr = s.monthly_stock_eval || [];
     let currentEval = s.stock_evaluation_yama;
     if (currentEval == null && stockEvalArr.length > 0) currentEval = stockEvalArr[0];
+    // 余力ベース健全性スコア (1〜5): 余力 = current − monthly
+    const healthScore = computeHealthScore(current, monthly);
     // 上位5%は最重要
     const priority = idx < Math.max(5, (fd.skus.length * 0.08) | 0) ? '最重要' : '通常';
     return {
@@ -99,6 +103,7 @@ function buildMaterials(fd) {
       monthly,
       daysLeft,
       currentEval,
+      healthScore,
       lead,
       priority,
       shape: s.diameter ? `線径${s.diameter}mm` : '—',
@@ -235,12 +240,33 @@ const STATUS_META = {
   excess:  { label: '過剰', color: '#1d4ed8', bg: '#dbeafe', dot: '#3b82f6' },
 };
 
-// 残日数+在庫評価+閾値から状態を算出
+// ===== 在庫健全性スコア (1〜5) — 余力ベース計算式 =====
+// 余力 = 現在庫 − 月間平均消費 (monthly)
+// 評価境界: ×1.0 / ×1.5 / ×2.0 / ×2.5 / ×3.0 (余力/monthly)
+function computeHealthScore(current, monthly) {
+  if (!monthly || monthly <= 0) return 3;
+  const y = current - monthly;
+  if (y <= monthly * 1.0) return 1;
+  if (y <= monthly * 1.5) return 2;
+  if (y <= monthly * 2.0) return 3;
+  if (y <= monthly * 2.5) return 4;
+  return 5;
+}
+
+// 評価3(適正)達成に必要な即時発注量
+// 目標: 余力 = monthly × 2.0 → 必要在庫 = monthly × 3.0
+function orderNeededForScore3(current, monthly) {
+  if (!monthly || monthly <= 0) return 0;
+  return Math.max(0, Math.round(monthly * 3.0 - current));
+}
+
+// 残日数+健全性スコア+閾値から状態を算出
 function computeStatus(m, danger, caution) {
   const days = m.daysLeft != null ? m.daysLeft : 999;
   if (days < danger) return 'risk';
   if (days < caution) return 'caution';
-  if (m.currentEval != null && m.currentEval >= 4) return 'excess';
+  const hs = m.healthScore != null ? m.healthScore : m.currentEval;
+  if (hs != null && hs >= 4) return 'excess';
   return 'safe';
 }
 
@@ -248,6 +274,7 @@ Object.assign(window, {
   MEETING_DATE, addMonths, fmtYM, fmtYMSlash,
   CATEGORIES, MATERIALS, STATS, SHIPS,
   predictStock, recommendOrder, confirmedOrder, computeStatus,
+  computeHealthScore, orderNeededForScore3,
   LEVEL_META, STATUS_META,
   FORECAST_PERIOD: { start: FD.period_start, end: FD.period_end, months: FD.months },
 });
