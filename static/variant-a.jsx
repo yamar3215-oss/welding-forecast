@@ -338,7 +338,7 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
   const fcArr = material.monthlyForecastArr || [];
   const stArr = material.monthlyStockArr || [];
   const orderArr = material.monthlyOrderArr || [];
-  const [simLevel, setSimLevel] = useState(3);
+  const [simLevel, setSimLevel] = useState(1);
   const simColor = SIM_COLORS[simLevel - 1];
 
   // シミュレーション在庫: 現在庫 から消費を引き、発注倍率分を補充
@@ -1468,7 +1468,7 @@ function VariantA() {
                 {/* グラフ説明: 月次予測と在庫シミュレーション */}
                 <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
                   <b>消費量予測（青）</b>: 建造スケジュールと過去実績から推定した月別使用量 kg ／
-                  <b> 在庫シミュレーション（カラーライン）</b>: 現在庫から消費を差し引き、選択した発注倍率分を補充した期末在庫推移 ／
+                  <b> 在庫シミュレーション（カラーライン）</b>: 初期状態=Lv1（発注なし）で、現在庫から月次消費を差し引いた在庫推移。ボタンで発注倍率を変更可 ／
                   <b> 95%CI（水色帯）</b>: MAPE×1.96σを用いた予測誤差範囲
                 </div>
                 <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
