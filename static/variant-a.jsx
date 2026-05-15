@@ -552,8 +552,8 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) 
             <g>
               <line x1={PL} y1={s3y} x2={W-PR} y2={s3y}
                 stroke="#f59e0b" strokeWidth={1} strokeDasharray="5 3" opacity={0.65}/>
-              <rect x={PL+2} y={s3y-9} width={34} height={12} rx={3} fill="#fffbeb" opacity={0.9}/>
-              <text x={PL+5} y={s3y} fontSize={9} fill="#b45309" fontWeight={700}>S3境界</text>
+              <rect x={PL+2} y={s3y-9} width={74} height={12} rx={3} fill="#fffbeb" opacity={0.9}/>
+              <text x={PL+5} y={s3y} fontSize={9} fill="#b45309" fontWeight={700}>適正在庫ライン（目標）</text>
             </g>
           );
         })()}
