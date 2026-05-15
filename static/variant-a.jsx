@@ -55,7 +55,7 @@ const HELP_TEXTS = {
   グラフ表示月数: '在庫推移グラフに表示する予測月数（3 / 6 / 9 / 12）を選択します。\n月数を増やすと長期の在庫枯渇リスクを把握しやすくなります。例えば12か月表示にすることで、半年後の危険水域への到達も事前に確認できます。',
   予測開始月: '在庫グラフの表示開始月を選択します。\n未来月を選ぶと特定の造船スケジュール前後の在庫状況を重点的に確認できます。「先頭に戻す」で当月起点に戻せます。',
   在庫健全性スコア: '余力（現在庫 − 月間消費）を月間消費で割った比率で 1〜5 評価します。\n評価3が「適正在庫ライン（目標）」で、急な需要増にも耐えられる安全在庫を保持している状態です。\n評価1〜2は危険域のため早急な発注が必要です。評価4〜5は過剰在庫の可能性があります。',
-  評価3発注量: '評価3（適正）を達成するために必要な即時発注量。\n計算式: 月間消費 × 3.0 − 現在庫\nグラフ期間末尾でスコア3を維持するには、この量に期間内消費の累計を加算した発注量が必要です。',
+  評価3発注量: '選択した目標月の時点でスコア3（適正）を達成するために必要な即時発注量。\n計算式: 月間消費 × 3.0 − 現在庫 + 目標月までの累計消費\nさらに途中月の欠品を防ぐ最小補充量も自動で上乗せします。\n目標月はパネル内のドロップダウンで変更できます。',
   MAPE: '予測精度の指標（Mean Absolute Percentage Error）。実績と予測の乖離率の平均値。\n目安: 20%未満=高精度（緑）、20〜50%=通常（橙）、50%以上=要警戒（赤）。\nホールドアウト検証（直近9か月）で算出しています。',
   アラート閾値: '残日数が「危険閾値」を下回ると赤ステータス、「注意閾値」を下回ると黄ステータスになります。\nリードタイム（発注から入荷までの日数）に合わせて設定してください。例: リードタイム90日なら危険閾値を90に設定。',
   パイプライン予測在庫: '現在の在庫に、発注済みの入荷予定分を加味した将来の在庫推移です。\n二重発注を防ぐための指標として活用してください。\n\n「予測在庫（現有分のみ）」との違い: こちらは現時点の在庫を消費だけで消化した場合の推移です。一方「予測在庫（入荷予定込み）」は確定発注分の入荷を加算しているため、実態に近い在庫見通しになります。\n\n技術詳細: ALS（交互最小二乗法）による船種別需要分解 + 竣工スケジュールから算出。',
@@ -343,7 +343,7 @@ const SIM_MULT = [0, 0.5, 1.0, 1.5, 2.0];
 const SIM_LABELS = ['発注なし', '50%', '推奨通り', '150%', '200%'];
 const SIM_COLORS = ['#94a3b8', '#f59e0b', '#22c55e', '#f97316', '#ef4444'];
 
-function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) {
+function SkuForecastChart({ material, months, mape_pct, ships, finalDecision, targetChartIdx }) {
   const W = 900, H = 215, PL = 68, PR = 20, PT = 22, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
   const fcArr = material.monthlyForecastArr || [];
@@ -359,18 +359,18 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) 
   const ci = useMemo(() => computeCI(fcArr, mape_pct), [material, mape_pct]);
 
   // ── Lv3「推奨通り」の自動計算 ──
-  // 目標: グラフ末尾でスコア3（月間消費×3.0）を達成し、かつ欠品しない最小発注量を期首一括発注
+  // 目標月(targetChartIdx)でスコア3を達成 + 全期間を通じた欠品回避の最小発注量
+  const _tIdx = targetChartIdx != null ? Math.min(targetChartIdx, fcArr.length - 1) : fcArr.length - 1;
   const lv3OrderQty = useMemo(() => {
-    const totalFc = fcArr.reduce((s, v) => s + Math.max(0, v || 0), 0);
-    // Score 3 達成: 期末在庫 = monthly × 3.0 → 必要発注量
-    const score3Req = Math.max(0, material.monthly * 3.0 - material.current + totalFc);
-    // 欠品防止: 期間中どの時点でも在庫≥0 (累積消費の最大値がcurrentを超えない量)
+    // Score 3 達成: 目標月末在庫 ≥ monthly × 3.0
+    const tFc = fcArr.slice(0, _tIdx + 1).reduce((s, v) => s + Math.max(0, v || 0), 0);
+    const score3Req = Math.max(0, material.monthly * 3.0 - material.current + tFc);
+    // 欠品回避: 全表示期間どの月も在庫≥0
     let cumFc = 0, maxCumFc = 0;
     for (const fc of fcArr) { cumFc += Math.max(0, fc || 0); maxCumFc = Math.max(maxCumFc, cumFc); }
     const stockoutMin = Math.max(0, maxCumFc - material.current);
-    // 両方の条件を満たす最小量
     return Math.round(Math.max(score3Req, stockoutMin));
-  }, [material, fcArr]);
+  }, [material, fcArr, _tIdx]);
 
   // シミュレーション在庫
   const simStock = useMemo(() => {
@@ -1177,6 +1177,7 @@ function VariantA() {
   const [finalDecisionInput, setFinalDecisionInput] = useState('');
   const [finalDecision, setFinalDecision] = useState(null);
   const [finalDecisionMsg, setFinalDecisionMsg] = useState('');
+  const [targetMonthIdx, setTargetMonthIdx] = useState(4); // 0-indexed into months[]
   const [showShips, setShowShips] = useState(false);  // 船表情報の表示/非表示 (デフォルト: 非表示)
   // お気に入り: localStorage永続化
   const [favorites, setFavorites] = useState(() => {
@@ -1261,15 +1262,27 @@ function VariantA() {
     };
   }, [selectedMaterial, startOffset, chartMonths]);
 
-  // グラフ末尾月にスコア3を達成するための発注量 (消費累計を加味した逆算)
+  // 目標月インデックス: months[]内の有効範囲にクランプ
+  const clampedTargetIdx = months.length > 0 ? Math.min(targetMonthIdx, months.length - 1) : 0;
+  const targetMonthLabel = months.length > 0 ? fmtYMLabel(months[clampedTargetIdx]) : '—';
+
+  // 目標月にスコア3を達成するための発注量（欠品回避プロテクト込み）
   const score3OrderQty = useMemo(() => {
-    if (!selectedMaterial || chartMonths.length === 0) return 0;
-    const fcArr = (chartMaterial || selectedMaterial).monthlyForecastArr || [];
-    const totalConsumption = fcArr.reduce((s, v) => s + (v || 0), 0);
-    // target: 期末在庫 = monthly × 3.0 (スコア3の上限 = スコア4への境界)
-    return Math.max(0, Math.round(selectedMaterial.monthly * 3.0 - selectedMaterial.current + totalConsumption));
-  }, [selectedMaterial, chartMaterial, chartMonths]);
-  const targetMonthLabel = chartMonths.length > 0 ? fmtYMLabel(chartMonths[chartMonths.length - 1]) : '—';
+    if (!selectedMaterial || months.length === 0) return 0;
+    const fcArr = selectedMaterial.monthlyForecastArr || [];
+    const tIdx = Math.min(clampedTargetIdx, fcArr.length - 1);
+    // score3達成: 目標月末在庫 = monthly × 3.0
+    const totalConsumption = fcArr.slice(0, tIdx + 1).reduce((s, v) => s + (v || 0), 0);
+    const score3Req = Math.max(0, selectedMaterial.monthly * 3.0 - selectedMaterial.current + totalConsumption);
+    // 欠品回避: 途中どの月も在庫がマイナスにならない最小補充量
+    let cumFc = 0, maxCumFc = 0;
+    for (let i = 0; i <= tIdx; i++) { cumFc += Math.max(0, fcArr[i] || 0); maxCumFc = Math.max(maxCumFc, cumFc); }
+    const stockoutMin = Math.max(0, maxCumFc - selectedMaterial.current);
+    return Math.round(Math.max(score3Req, stockoutMin));
+  }, [selectedMaterial, months, clampedTargetIdx]);
+
+  // SkuForecastChart に渡すチャート内ターゲットインデックス
+  const targetChartIdx = Math.max(0, Math.min(clampedTargetIdx - startOffset, chartMonths.length - 1));
 
   // ── ハンドラ ──
   const handleSort = useCallback((key) => {
@@ -1494,7 +1507,7 @@ ${shipNote}
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
-    { label: `${targetMonthLabel}に健全在庫スコア3になるための発注量`, value: fmt(score3OrderQty) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: score3OrderQty > 0 ? '#b45309' : '#15803d' },
+    { label: `${targetMonthLabel}時点でスコア3を達成するために必要な量`, value: fmt(score3OrderQty) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: score3OrderQty > 0 ? '#b45309' : '#15803d' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
@@ -1961,8 +1974,25 @@ ${shipNote}
                   marginBottom: 8, background: '#fffbeb', border: '1px solid #fde68a',
                   borderRadius: 8, padding: '8px 12px',
                 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: '#92400e', whiteSpace: 'nowrap' }}>
-                    {targetMonthLabel}スコア3達成：<span style={{ color: '#b45309', fontSize: 15 }}>{fmt(score3OrderQty)} kg</span>
+                  {/* 目標月選択 + 発注量表示 */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#78350f', whiteSpace: 'nowrap' }}>目標月:</span>
+                    <select
+                      value={clampedTargetIdx}
+                      onChange={e => setTargetMonthIdx(Number(e.target.value))}
+                      style={{
+                        fontSize: 11, fontWeight: 700, padding: '3px 6px', borderRadius: 6,
+                        border: '1.5px solid #fcd34d', background: '#fff', color: '#78350f',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {months.map((ym, i) => (
+                        <option key={ym} value={i}>{fmtYMLabel(ym)}（{i + 1}ヶ月後）</option>
+                      ))}
+                    </select>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#92400e', whiteSpace: 'nowrap' }}>
+                      時点でスコア3達成：<span style={{ color: '#b45309', fontSize: 15 }}>{fmt(score3OrderQty)} kg</span>
+                    </div>
                   </div>
                   <div style={{ width: 1, height: 24, background: '#fcd34d', flexShrink: 0 }}/>
                   <label style={{ fontSize: 11, fontWeight: 600, color: '#78350f', whiteSpace: 'nowrap' }}>
@@ -2022,7 +2052,7 @@ ${shipNote}
                     </span>
                   </div>
                 </div>
-                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={showShips ? SHIPS : []} finalDecision={finalDecision}/>
+                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={showShips ? SHIPS : []} finalDecision={finalDecision} targetChartIdx={targetChartIdx}/>
                 <OrderRationalePanel material={selectedMaterial} ships={showShips ? SHIPS : []} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
                 <MapeHistoryChart material={selectedMaterial} globalMapeByMonth={globalMapeByMonth}/>
                 <AccuracyFactorsPanel material={selectedMaterial} globalMape={displayedMape}/>
