@@ -49,6 +49,50 @@ function fmtMape(pct) {
   return pct == null ? '—' : `${Math.round(pct)}%`;
 }
 
+// ──── ヘルプツールチップ ────
+// クリックで表示/非表示。ラベル横の ❓ボタンに適用する。
+const HELP_TEXTS = {
+  グラフ表示月数: '在庫推移グラフに表示する予測月数（3/6/9/12）を選択します。月数を増やすと長期の在庫枯渇リスクを把握しやすくなります。',
+  予測開始月: '在庫グラフの表示開始月を選択します。未来月を選ぶと特定の造船スケジュール前後の在庫状況を確認できます。',
+  在庫健全性スコア: '余力（現在庫 − 月間消費）を月間消費で割った比率で 1〜5 評価。評価3（適正）は余力が月間消費の2.0倍。評価1〜2 は危険域のため早急な発注が必要です。',
+  評価3発注量: '評価3（適正）を達成するために必要な即時発注量。計算式: 月間消費 × 3.0 − 現在庫。マイナスになる場合（在庫十分）は 0 表示。',
+  MAPE: '予測精度の指標（Mean Absolute Percentage Error）。実績と予測の乖離率の平均値。20%未満=高精度（緑）、50%以上=要警戒（赤）。ホールドアウト検証で算出。',
+  アラート閾値: '残日数が「危険閾値」を下回ると赤ステータス、「注意閾値」を下回ると黄ステータスになります。リードタイムに合わせて設定してください。',
+  溶材会議: '新来島ドック納品表に記載された銘柄のみを表示します。納品表とデータが自動照合され、板継用・全姿勢用も独立した行として表示されます。',
+  パイプライン予測在庫: 'ALS（交互最小二乗法）による船種別需要分解 + 竣工スケジュールから算出した月末予測在庫量。実際の発注量（確定分）を加味したシミュレーション結果です。',
+};
+
+function InfoTooltip({ id }) {
+  const [open, setOpen] = React.useState(false);
+  const text = HELP_TEXTS[id];
+  if (!text) return null;
+  return (
+    <span style={{ position: 'relative', display: 'inline-block', verticalAlign: 'middle', marginLeft: 3 }}>
+      <button
+        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+        style={{
+          background: open ? '#0ea5e9' : '#e0f2fe', border: 'none', borderRadius: '50%',
+          width: 14, height: 14, fontSize: 9, fontWeight: 700, lineHeight: '14px',
+          color: open ? '#fff' : '#0369a1', cursor: 'pointer', padding: 0,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        }}
+        title={id}
+      >?</button>
+      {open && (
+        <div style={{
+          position: 'absolute', left: 0, top: 18, zIndex: 999, width: 240,
+          background: '#1e293b', color: '#f0f9ff', fontSize: 11, lineHeight: 1.6,
+          borderRadius: 8, padding: '10px 12px', boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+          pointerEvents: 'none',
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 4, color: '#7dd3fc' }}>{id}</div>
+          {text}
+        </div>
+      )}
+    </span>
+  );
+}
+
 const STATUS_RANK = { risk: 0, caution: 1, safe: 2, excess: 3 };
 const ST = {
   risk:    { label: '危険', bg: '#fee2e2', color: '#dc2626', dot: '#ef4444' },
@@ -880,9 +924,31 @@ function VariantA() {
   const urgentCount = useMemo(() => enriched.filter(s => s.status === 'risk').length, [enriched]);
   const cautionCount = useMemo(() => enriched.filter(s => s.status === 'caution').length, [enriched]);
   // 溶材会議: 納品書に含まれる銘柄（なければアラート銘柄にフォールバック）
+  // 正規化マッチング: trailing underscore 除去 + prefix + 板継用/全姿勢用サフィックス
   const meetingList = useMemo(() => {
-    if (meetingSkus.length > 0) return enriched.filter(s => meetingSkus.includes(s.sku));
-    return enriched.filter(s => s.status === 'risk' || s.status === 'caution');
+    if (meetingSkus.length === 0) return enriched.filter(s => s.status === 'risk' || s.status === 'caution');
+    const USAGE_SFXS = ['_板継用', '_全姿勢用'];
+    const normSet = new Set(meetingSkus.map(s => s.replace(/_+$/, '')));
+    return enriched.filter(s => {
+      // 1: 完全一致
+      if (meetingSkus.includes(s.sku)) return true;
+      const normSku = s.sku.replace(/_+$/, '');
+      // 2: 正規化完全一致
+      if (normSet.has(normSku)) return true;
+      // 3: 板継用/全姿勢用サフィックスを除いた基底が一致
+      for (const sfx of USAGE_SFXS) {
+        if (s.sku.endsWith(sfx)) {
+          const base = s.sku.slice(0, -sfx.length);
+          const normBase = base.replace(/_+$/, '');
+          if (meetingSkus.includes(base) || normSet.has(normBase)) return true;
+        }
+      }
+      // 4: prefix マッチ (納品表 SKU が forecast SKU の prefix、またはその逆)
+      for (const ms of normSet) {
+        if (normSku.startsWith(ms + '_') || ms.startsWith(normSku + '_')) return true;
+      }
+      return false;
+    });
   }, [enriched, meetingSkus]);
   const meetingCount = meetingList.length;
 
@@ -1196,7 +1262,7 @@ function VariantA() {
 
           {/* 予測グラフ表示月数 */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>グラフ表示月数</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>グラフ表示月数<InfoTooltip id="グラフ表示月数"/></div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
               {[3, 6, 9, 12].map(n => (
                 <button key={n} onClick={() => setFMonths(n)} style={{
@@ -1211,7 +1277,7 @@ function VariantA() {
 
           {/* 予測開始月 */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>予測開始月</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>予測開始月<InfoTooltip id="予測開始月"/></div>
             <select
               value={startOffset}
               onChange={e => setStartOffset(Number(e.target.value))}
@@ -1234,10 +1300,10 @@ function VariantA() {
             )}
           </div>
 
-          {/* 推奨発注計算期間（スライダー: 1〜6か月） */}
+          {/* 在庫健全性スコア説明 */}
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>
-              在庫健全性スコア (1〜5)
+              在庫健全性スコア (1〜5)<InfoTooltip id="在庫健全性スコア"/>
             </div>
             <div style={{ fontSize: 10, color: '#475569', lineHeight: 1.6 }}>
               余力 = 現在庫 − 月間消費<br/>
@@ -1254,7 +1320,7 @@ function VariantA() {
 
           {/* アラート閾値 */}
           <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>アラート閾値</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>アラート閾値<InfoTooltip id="アラート閾値"/></div>
             {[
               { label: '危険', color: '#dc2626', val: dangerT, set: setDangerT },
               { label: '注意', color: '#eab308', val: cautionT, set: setCautionT },
@@ -1276,16 +1342,16 @@ function VariantA() {
             <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 }}>絞り込み</div>
             {[
               { key: 'all', label: `全銘柄 (${enriched.length}件)` },
-              { key: 'meeting', label: `溶材会議 (${meetingCount}件)` },
-            ].map(({ key, label }) => (
+              { key: 'meeting', label: `溶材会議 (${meetingCount}件)`, tooltip: '溶材会議' },
+            ].map(({ key, label, tooltip }) => (
               <button key={key} onClick={() => setFilter(key)} style={{
-                display: 'block', width: '100%', textAlign: 'left',
+                display: 'flex', alignItems: 'center', width: '100%', textAlign: 'left',
                 padding: '7px 10px', marginBottom: 4, fontSize: 12,
                 fontWeight: filter === key ? 700 : 500,
                 background: filter === key ? '#f1f5f9' : 'transparent',
                 color: filter === key ? '#0f172a' : '#64748b',
                 border: 'none', borderRadius: 6, cursor: 'pointer', minHeight: 40,
-              }}>{label}</button>
+              }}>{label}{tooltip && <InfoTooltip id={tooltip}/>}</button>
             ))}
             {/* フィルター別MAPE速報 */}
             <div style={{ background: '#f8fafc', borderRadius: 6, padding: '6px 10px', border: '1px solid #e2e8f0', marginTop: 4 }}>
@@ -1457,8 +1523,8 @@ function VariantA() {
                     <ThSort label="現在庫 (kg)" sortKey="current" textAlign="right" {...thProps}/>
                     <ThSort label="残日数" sortKey="daysLeft" {...thProps}/>
                     <ThSort label="月間消費 (kg)" sortKey="monthly" textAlign="right" {...thProps}/>
-                    <ThSort label="評価3発注量 (kg)" sortKey="orderSum" textAlign="right" {...thProps}/>
-                    <ThSort label="MAPE" sortKey="mapePct" textAlign="center" {...thProps}/>
+                    <ThSort label={<span>評価3発注量 (kg)<InfoTooltip id="評価3発注量"/></span>} sortKey="orderSum" textAlign="right" {...thProps}/>
+                    <ThSort label={<span>MAPE<InfoTooltip id="MAPE"/></span>} sortKey="mapePct" textAlign="center" {...thProps}/>
                     <th style={{
                       padding: '9px 10px', fontSize: 11, fontWeight: 600, color: '#64748b',
                       borderBottom: '2px solid #e2e8f0', background: '#fafafa',
