@@ -1340,6 +1340,101 @@ function VariantA() {
     }
   };
 
+  const handleExportCSV = useCallback(() => {
+    const BOM = '﻿';
+    const headers = [
+      '銘柄コード', 'ブランド', '径(mm)', '形態(kg)', '現在庫(kg)', '残日数(日)',
+      '月間消費(kg)', '健全スコア(1-5)', 'スコア3発注量(kg)',
+      '発注状況', 'MAPE(%)', 'ステータス', 'お気に入り',
+    ];
+    const rows = displayed.map(m => [
+      m.sku,
+      m.brand || '',
+      m.diameter || '',
+      m.form || '',
+      Math.round(m.current),
+      m.daysLeft >= 999 ? '' : m.daysLeft,
+      Math.round(m.monthly),
+      m.healthScore != null ? m.healthScore : '',
+      Math.max(0, Math.round(m.monthly * 3.0 - m.current)),
+      orderStatus[m.sku] || '未発注',
+      m.mapePct != null ? Math.round(m.mapePct) : '',
+      (ST[m.status] || {}).label || m.status,
+      favorites.has(m.sku) ? '★' : '',
+    ]);
+    if (!showShips) {
+      headers.push('備考');
+      rows.forEach(r => r.push('船表情報は非表示（社外秘）'));
+    }
+    const csv = BOM + [headers, ...rows]
+      .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `在庫ダッシュボード_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [displayed, orderStatus, favorites, showShips]);
+
+  const handleExportPDF = useCallback(() => {
+    const now = new Date().toLocaleString('ja-JP');
+    const shipNote = showShips ? '' :
+      '<p style="color:#dc2626;font-weight:700;margin:6px 0;">※ 船表情報は非表示（社外秘）</p>';
+    const colHeaders = [
+      '銘柄コード', 'ブランド', '径', '形態',
+      '現在庫(kg)', '残日数', '月間消費(kg)',
+      '健全\nスコア', 'スコア3\n発注量(kg)',
+      '発注状況', 'MAPE', 'ステータス', '★',
+    ];
+    const scoreBg = (s) => s <= 2 ? '#fee2e2' : s >= 4 ? '#dbeafe' : '#dcfce7';
+    const rows = displayed.map(m => {
+      const st = ST[m.status] || {};
+      const s3 = Math.max(0, Math.round(m.monthly * 3.0 - m.current));
+      return `<tr>
+        <td>${m.sku}</td>
+        <td>${m.brand || ''}</td>
+        <td>${m.diameter || ''}</td>
+        <td>${m.form || ''}</td>
+        <td style="text-align:right">${Math.round(m.current).toLocaleString('ja-JP')}</td>
+        <td style="text-align:right">${m.daysLeft >= 999 ? '—' : m.daysLeft}</td>
+        <td style="text-align:right">${Math.round(m.monthly).toLocaleString('ja-JP')}</td>
+        <td style="text-align:center;background:${m.healthScore != null ? scoreBg(m.healthScore) : ''}">${m.healthScore != null ? m.healthScore : '—'}</td>
+        <td style="text-align:right">${s3.toLocaleString('ja-JP')}</td>
+        <td>${orderStatus[m.sku] || '未発注'}</td>
+        <td style="text-align:center">${m.mapePct != null ? Math.round(m.mapePct) + '%' : '—'}</td>
+        <td style="background:${st.bg || ''};color:${st.color || ''};text-align:center;font-weight:700">${st.label || m.status}</td>
+        <td style="text-align:center">${favorites.has(m.sku) ? '★' : ''}</td>
+      </tr>`;
+    }).join('');
+    const html = `<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">
+<title>在庫ダッシュボード ${now}</title>
+<style>
+  body { font-family: "Hiragino Sans", "Meiryo", sans-serif; font-size: 10.5px; margin: 16px; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  p { margin: 2px 0 6px; color: #475569; font-size: 10px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #cbd5e1; padding: 3px 5px; white-space: nowrap; }
+  th { background: #1e3a5f; color: #fff; font-size: 9.5px; }
+  tr:nth-child(even) { background: #f8fafc; }
+  @media print { @page { margin: 10mm; size: A4 landscape; } body { margin: 0; } }
+</style></head><body>
+<h1>🔧 在庫ダッシュボード — 出力レポート</h1>
+<p>出力日時: ${now} ／ 表示件数: ${displayed.length} 件 ／ フィルター: ${filter === 'favorites' ? 'お気に入りのみ' : '全銘柄'}</p>
+${shipNote}
+<table>
+  <thead><tr>${colHeaders.map(h => `<th style="white-space:pre-line">${h}</th>`).join('')}</tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+</body></html>`;
+    const win = window.open('', '_blank');
+    if (!win) { alert('ポップアップがブロックされました。ポップアップを許可してから再試行してください。'); return; }
+    win.document.write(html);
+    win.document.close();
+    setTimeout(() => win.print(), 500);
+  }, [displayed, orderStatus, favorites, showShips, filter]);
+
   const handleUploadFile = async (e, fileType) => {
     const file = e.target.files[0];
     e.target.value = '';
@@ -1453,6 +1548,19 @@ function VariantA() {
           }}>
             {showShips ? '🚢 船表: 表示中' : '🔒 船表: 非表示'}
           </button>
+          {/* CSV / PDF エクスポート */}
+          {!isMobile && (<>
+            <button onClick={handleExportCSV} title="CSV形式でダウンロード" style={{
+              background: '#065f46', color: '#fff', border: 'none',
+              borderRadius: 8, padding: '0 12px', fontWeight: 700, fontSize: 12,
+              cursor: 'pointer', minHeight: 44, whiteSpace: 'nowrap',
+            }}>↓ CSV</button>
+            <button onClick={handleExportPDF} title="印刷/PDF出力" style={{
+              background: '#7c2d12', color: '#fff', border: 'none',
+              borderRadius: 8, padding: '0 12px', fontWeight: 700, fontSize: 12,
+              cursor: 'pointer', minHeight: 44, whiteSpace: 'nowrap',
+            }}>🖨 印刷/PDF</button>
+          </>)}
           <button onClick={() => setUploadPanel(p => !p)} style={{
             background: uploadPanel ? '#0f766e' : '#059669', color: '#fff', border: 'none',
             borderRadius: 8, padding: '0 14px', fontWeight: 700, fontSize: 13,
