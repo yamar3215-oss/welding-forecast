@@ -332,14 +332,14 @@ const SIM_MULT = [0, 0.5, 1.0, 1.5, 2.0];
 const SIM_LABELS = ['発注なし', '50%', '推奨通り', '150%', '200%'];
 const SIM_COLORS = ['#94a3b8', '#f59e0b', '#22c55e', '#f97316', '#ef4444'];
 
-function SkuForecastChart({ material, months, mape_pct, ships }) {
+function SkuForecastChart({ material, months, mape_pct, ships, finalDecision }) {
   const W = 900, H = 215, PL = 68, PR = 20, PT = 22, PB = 40;
   const iW = W - PL - PR, iH = H - PT - PB;
   const fcArr = material.monthlyForecastArr || [];
   const stArr = material.monthlyStockArr || [];
   const orderArr = material.monthlyOrderArr || [];
   const [simLevel, setSimLevel] = useState(1);
-  const [visible, setVisible] = useState({ fc: true, sim: true, st: true, ci: true, stockCi: true });
+  const [visible, setVisible] = useState({ fc: true, sim: true, st: true, ci: true, stockCi: true, fd: true });
   const [hoverIdx, setHoverIdx] = useState(null);
   const svgRef = useRef(null);
   const simColor = SIM_COLORS[simLevel - 1];
@@ -372,13 +372,25 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
     return { worst, best };
   }, [material, simLevel, ci]);
 
+  // 最終決定量での在庫シミュレーション (発注量を month[0] に加算)
+  const finalDecisionStock = useMemo(() => {
+    if (finalDecision == null) return [];
+    let s = material.current + finalDecision;
+    return fcArr.map((fc) => { s = s - (fc || 0); return Math.max(0, s); });
+  }, [material, finalDecision, fcArr]);
+
+  // スコア3閾値 (月間消費×3.0) — グラフ上の水平線
+  const score3Threshold = material.monthly * 3.0;
+
   const maxV = useMemo(() => {
     const all = [
       ...fcArr, ...stArr.filter(v => v != null), ...simStock,
       ...simStockCI.best, ...ci.map(c => c.upper),
+      ...(finalDecisionStock.length ? finalDecisionStock : []),
+      score3Threshold,
     ];
     return Math.max(...all, 1);
-  }, [fcArr, stArr, simStock, simStockCI, ci]);
+  }, [fcArr, stArr, simStock, simStockCI, ci, finalDecisionStock, score3Threshold]);
 
   if (!months || months.length < 2) return null;
   const sx = makeXMapper(months, PL, iW);
@@ -415,6 +427,10 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
     setHoverIdx(ci2);
   };
 
+  const fdPoly = finalDecisionStock.length > 0
+    ? finalDecisionStock.map((v, i) => `${sx(months[i])},${sy(v)}`).join(' ')
+    : '';
+
   // Legend definition
   const LEGEND = [
     { k: 'fc',      label: '予測消費量',         type: 'line',  color: '#0ea5e9' },
@@ -422,6 +438,7 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
     { k: 'stockCi', label: '在庫95%CI',           type: 'band',  color: '#22c55e' },
     { k: 'st',      label: 'パイプライン予測在庫', type: 'dash',  color: '#22c55e' },
     { k: 'ci',      label: '消費95%CI',           type: 'band',  color: '#0ea5e9' },
+    ...(finalDecision != null ? [{ k: 'fd', label: `最終決定量(${fmt(Math.round(finalDecision))}kg)`, type: 'line', color: '#f59e0b', dash: false }] : []),
   ];
 
   return (
@@ -528,6 +545,19 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
           </>
         )}
 
+        {/* スコア3閾値ライン (月間消費×3.0) */}
+        {score3Threshold <= maxV && (() => {
+          const s3y = sy(score3Threshold);
+          return (
+            <g>
+              <line x1={PL} y1={s3y} x2={W-PR} y2={s3y}
+                stroke="#f59e0b" strokeWidth={1} strokeDasharray="5 3" opacity={0.65}/>
+              <rect x={PL+2} y={s3y-9} width={34} height={12} rx={3} fill="#fffbeb" opacity={0.9}/>
+              <text x={PL+5} y={s3y} fontSize={9} fill="#b45309" fontWeight={700}>S3境界</text>
+            </g>
+          );
+        })()}
+
         {/* シミュレーション在庫ライン */}
         {simPts.length > 1 && visible.sim && (
           <>
@@ -536,6 +566,18 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
             {simPts.map(([x,y],i) => (
               <circle key={i} cx={x} cy={y} r={hoverIdx===i ? 5 : 3} fill={simColor}
                 style={{ transition: 'r 0.1s' }}/>
+            ))}
+          </>
+        )}
+
+        {/* 最終決定量シミュレーションライン（橙） */}
+        {fdPoly && finalDecisionStock.length > 1 && visible.fd && (
+          <>
+            <polyline points={fdPoly} fill="none" stroke="#f59e0b" strokeWidth={3}
+              strokeLinecap="round" strokeLinejoin="round"/>
+            {finalDecisionStock.map((v,i) => (
+              <circle key={i} cx={sx(months[i])} cy={sy(v)} r={hoverIdx===i ? 6 : 3.5}
+                fill="#f59e0b" stroke="#fff" strokeWidth={1.5} style={{ transition: 'r 0.1s' }}/>
             ))}
           </>
         )}
@@ -562,16 +604,18 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
           const ciL = ci[hoverIdx]?.lower ?? fc;
           const scW = simStockCI.worst[hoverIdx] ?? sim;
           const scB = simStockCI.best[hoverIdx] ?? sim;
+          const fdVal = finalDecisionStock[hoverIdx];
           const rows = [
             { label: months[hoverIdx].replace('-','/'), val: null, hdr: true },
             { label: '予測消費量', val: `${fmtK(fc)} kg`, color: '#60a5fa' },
             { label: '在庫(シミュ)', val: `${fmtK(sim)} kg`, color: simColor },
+            ...(fdVal != null ? [{ label: '最終決定発注後', val: `${fmtK(fdVal)} kg`, color: '#fbbf24' }] : []),
             { label: '消費95%上限', val: `${fmtK(ciU)} kg`, color: '#94a3b8' },
             { label: '消費95%下限', val: `${fmtK(ciL)} kg`, color: '#94a3b8' },
             { label: '在庫・最悪', val: `${fmtK(scW)} kg`, color: '#4ade80' },
             { label: '在庫・最良', val: `${fmtK(scB)} kg`, color: '#4ade80' },
           ];
-          const TW = 186, TH = rows.length * 15 + 12;
+          const TW = 192, TH = rows.length * 15 + 12;
           const tx = hx + 10 + TW > W - PR ? hx - TW - 8 : hx + 10;
           const ty = Math.max(PT + 2, Math.min(PT + iH - TH - 2, sy(sim) - TH / 2));
           return (
@@ -582,6 +626,8 @@ function SkuForecastChart({ material, months, mape_pct, ships }) {
                 stroke="#fff" strokeWidth={1.5}/>}
               {visible.sim && <circle cx={hx} cy={sy(sim)} r={5.5} fill={simColor} opacity={0.95}
                 stroke="#fff" strokeWidth={1.5}/>}
+              {fdVal != null && visible.fd && <circle cx={hx} cy={sy(fdVal)} r={5.5} fill="#f59e0b"
+                opacity={0.95} stroke="#fff" strokeWidth={1.5}/>}
               <rect x={tx} y={ty} width={TW} height={TH} rx={6}
                 fill="#1e293b" fillOpacity={0.94}/>
               {rows.map((r, ri) => r.hdr ? (
@@ -1054,6 +1100,9 @@ function VariantA() {
   const [selectedSku, setSelectedSku] = useState(null);
   const [inactiveSku, setInactiveSku] = useState(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [finalDecisionInput, setFinalDecisionInput] = useState('');
+  const [finalDecision, setFinalDecision] = useState(null);   // 確定した最終決定量 (kg)
+  const [finalDecisionMsg, setFinalDecisionMsg] = useState('');
 
   const width = useWindowWidth();
   const isMobile = width < 768;
@@ -1157,6 +1206,16 @@ function VariantA() {
     };
   }, [selectedMaterial, startOffset, chartMonths]);
 
+  // グラフ末尾月にスコア3を達成するための発注量 (消費累計を加味した逆算)
+  const score3OrderQty = useMemo(() => {
+    if (!selectedMaterial || chartMonths.length === 0) return 0;
+    const fcArr = (chartMaterial || selectedMaterial).monthlyForecastArr || [];
+    const totalConsumption = fcArr.reduce((s, v) => s + (v || 0), 0);
+    // target: 期末在庫 = monthly × 3.0 (スコア3の上限 = スコア4への境界)
+    return Math.max(0, Math.round(selectedMaterial.monthly * 3.0 - selectedMaterial.current + totalConsumption));
+  }, [selectedMaterial, chartMaterial, chartMonths]);
+  const targetMonthLabel = chartMonths.length > 0 ? fmtYMLabel(chartMonths[chartMonths.length - 1]) : '—';
+
   // ── ハンドラ ──
   const handleSort = useCallback((key) => {
     setSortKey(prev => {
@@ -1189,6 +1248,23 @@ function VariantA() {
     setRunning(false);
   };
 
+  const handleFinalDecision = async () => {
+    const qty = parseFloat(finalDecisionInput);
+    if (isNaN(qty) || qty < 0) { setFinalDecisionMsg('正しい数値(kg)を入力してください'); return; }
+    setFinalDecision(qty);
+    if (!selectedMaterial) { setFinalDecisionMsg('✓ グラフに反映しました'); return; }
+    try {
+      const res = await fetch('/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sku: selectedMaterial.sku, ym: targetMonthLabel, qty }),
+      });
+      setFinalDecisionMsg(res.ok ? '✓ 保存・グラフ反映しました' : '⚠ 保存エラー（グラフには反映済）');
+    } catch (_) {
+      setFinalDecisionMsg('⚠ 保存エラー（グラフには反映済）');
+    }
+  };
+
   const handleUploadFile = async (e, fileType) => {
     const file = e.target.files[0];
     e.target.value = '';
@@ -1214,6 +1290,13 @@ function VariantA() {
       setMsg(`エラー: ${err.message}`);
     }
   };
+
+  // 銘柄選択変更時に最終決定量をリセット
+  useEffect(() => {
+    setFinalDecision(null);
+    setFinalDecisionInput('');
+    setFinalDecisionMsg('');
+  }, [selectedSku]);
 
   // 溶材会議 SKU リストを起動時に取得
   useEffect(() => {
@@ -1244,7 +1327,7 @@ function VariantA() {
   const kpiCards = selectedMaterial ? [
     { label: '現在庫', value: fmt(selectedMaterial.current) + ' kg', unit: selectedMaterial.isStockSynthesized ? '（推定値）' : '', color: '#0f172a' },
     { label: '残日数', value: daysToText(selectedMaterial.daysLeft), unit: `月間消費 ${fmt(selectedMaterial.monthly)} kg`, color: selectedMaterial.status === 'risk' ? '#dc2626' : selectedMaterial.status === 'caution' ? '#b45309' : '#15803d' },
-    { label: '評価3達成 推奨発注量', value: fmt(selectedMaterial.orderSum) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: selectedMaterial.orderSum > 0 ? '#b45309' : '#15803d' },
+    { label: `${targetMonthLabel}に健全在庫スコア3になるための発注量`, value: fmt(score3OrderQty) + ' kg', unit: `在庫健全性スコア ${selectedMaterial.healthScore ?? '—'}/5 ／ MAPE: ${fmtMape(displayedMape)}`, color: score3OrderQty > 0 ? '#b45309' : '#15803d' },
   ] : [
     { label: '総予測重量', value: fmt(summary.total_forecast_kg), unit: `kg ／ ${months.length}か月`, color: '#0f172a' },
     { label: mapeKpiLabel, value: mapeKpiValue, unit: mapeKpiUnit, color: mapeKpiColor },
@@ -1611,13 +1694,57 @@ function VariantA() {
                     </span>
                   </div>
                 </div>
+                {/* 最終決定量パネル */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                  marginBottom: 8, background: '#fffbeb', border: '1px solid #fde68a',
+                  borderRadius: 8, padding: '8px 12px',
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#92400e', whiteSpace: 'nowrap' }}>
+                    {targetMonthLabel}スコア3達成：<span style={{ color: '#b45309', fontSize: 15 }}>{fmt(score3OrderQty)} kg</span>
+                  </div>
+                  <div style={{ width: 1, height: 24, background: '#fcd34d', flexShrink: 0 }}/>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: '#78350f', whiteSpace: 'nowrap' }}>
+                    溶材会議での最終決定量:
+                  </label>
+                  <input
+                    type="number" min={0} step={1}
+                    value={finalDecisionInput}
+                    onChange={e => setFinalDecisionInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleFinalDecision()}
+                    placeholder={`例: ${fmt(score3OrderQty)}`}
+                    style={{
+                      width: 110, padding: '5px 8px', borderRadius: 6,
+                      border: finalDecision != null ? '2px solid #f59e0b' : '1px solid #fcd34d',
+                      fontSize: 13, fontWeight: 700, textAlign: 'right', background: '#fff',
+                    }}
+                  />
+                  <span style={{ fontSize: 11, color: '#92400e' }}>kg</span>
+                  <button onClick={handleFinalDecision} style={{
+                    padding: '5px 14px', borderRadius: 6, fontSize: 12, fontWeight: 700,
+                    background: '#f59e0b', color: '#fff', border: 'none', cursor: 'pointer',
+                  }}>確定・グラフ反映</button>
+                  {finalDecision != null && (
+                    <button onClick={() => { setFinalDecision(null); setFinalDecisionInput(''); setFinalDecisionMsg(''); }}
+                      style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6,
+                        background: '#fff', border: '1px solid #fcd34d', color: '#92400e', cursor: 'pointer' }}>
+                      クリア
+                    </button>
+                  )}
+                  {finalDecisionMsg && (
+                    <span style={{ fontSize: 11, color: finalDecisionMsg.startsWith('✓') ? '#15803d' : '#dc2626', fontWeight: 600 }}>
+                      {finalDecisionMsg}
+                    </span>
+                  )}
+                </div>
+
                 {/* グラフ説明: 月次予測と在庫シミュレーション */}
                 <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
                   <b>消費量予測（青）</b>: 建造スケジュールと過去実績から推定した月別使用量 kg ／
                   <b> 在庫シミュレーション（カラーライン）</b>: 初期状態=Lv1（発注なし）で、現在庫から月次消費を差し引いた在庫推移。ボタンで発注倍率を変更可 ／
                   <b> 95%CI（水色帯）</b>: MAPE×1.96σを用いた予測誤差範囲
                 </div>
-                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS}/>
+                <SkuForecastChart material={chartMaterial || selectedMaterial} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)} mape_pct={displayedMape || globalMape} ships={SHIPS} finalDecision={finalDecision}/>
                 <OrderRationalePanel material={selectedMaterial} ships={SHIPS} months={chartMonths.length >= 2 ? chartMonths : months.slice(0, fMonths)}/>
                 <MapeHistoryChart material={selectedMaterial} globalMapeByMonth={globalMapeByMonth}/>
                 <AccuracyFactorsPanel material={selectedMaterial} globalMape={displayedMape}/>
