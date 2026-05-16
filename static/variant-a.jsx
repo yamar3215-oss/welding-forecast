@@ -571,6 +571,29 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision, ta
         style={{ width: '100%', height: 'auto', display: 'block', cursor: 'crosshair' }}
         onMouseMove={handleMouseMove} onMouseLeave={() => setHoverIdx(null)}>
 
+        <defs>
+          <linearGradient id="dangerZoneGrad" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+            <stop offset="0%" stopColor="#ef4444" stopOpacity={0.13}/>
+            <stop offset="60%" stopColor="#f97316" stopOpacity={0.07}/>
+            <stop offset="100%" stopColor="#fbbf24" stopOpacity={0.03}/>
+          </linearGradient>
+          <filter id="fdGlow">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+
+        {/* 危険ゾーン背景（スコア3閾値以下）— 他の要素の下に描画 */}
+        {score3Threshold <= maxV && (() => {
+          const s3y = sy(score3Threshold);
+          const zoneH = Math.max(0, PT + iH - s3y);
+          if (zoneH <= 0) return null;
+          return (
+            <rect x={PL} y={s3y} width={W - PL - PR} height={zoneH}
+              fill="url(#dangerZoneGrad)" rx={0}/>
+          );
+        })()}
+
         {/* Grid */}
         {yTicks.map((t, i) => (
           <g key={i}>
@@ -622,15 +645,26 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision, ta
           </>
         )}
 
-        {/* スコア3閾値ライン (月間消費×3.0) */}
+        {/* スコア3閾値ライン（適正基準線） */}
         {score3Threshold <= maxV && (() => {
           const s3y = sy(score3Threshold);
+          const LBL = '適正基準（スコア3）';
+          const lblW = 96, lblH = 14;
+          const lblX = W - PR - lblW - 2;
           return (
             <g>
+              {/* シャドウ層（視認性向上） */}
               <line x1={PL} y1={s3y} x2={W-PR} y2={s3y}
-                stroke="#f59e0b" strokeWidth={1} strokeDasharray="5 3" opacity={0.65}/>
-              <rect x={PL+2} y={s3y-9} width={74} height={12} rx={3} fill="#fffbeb" opacity={0.9}/>
-              <text x={PL+5} y={s3y} fontSize={9} fill="#b45309" fontWeight={700}>適正在庫ライン（目標）</text>
+                stroke="#fff" strokeWidth={4} opacity={0.6}/>
+              {/* メイン基準線 — 太い破線、紫色 */}
+              <line x1={PL} y1={s3y} x2={W-PR} y2={s3y}
+                stroke="#7c3aed" strokeWidth={2.2} strokeDasharray="9 4" opacity={0.92}/>
+              {/* 右端ラベル背景 */}
+              <rect x={lblX} y={s3y - lblH} width={lblW} height={lblH} rx={4}
+                fill="#7c3aed" opacity={0.92}/>
+              {/* 右端ラベルテキスト */}
+              <text x={lblX + lblW / 2} y={s3y - 3} fontSize={8.5} fill="#fff"
+                fontWeight={700} textAnchor="middle">{LBL}</text>
             </g>
           );
         })()}
@@ -647,14 +681,26 @@ function SkuForecastChart({ material, months, mape_pct, ships, finalDecision, ta
           </>
         )}
 
-        {/* 最終決定量シミュレーションライン（橙） */}
+        {/* 最終決定量シミュレーションライン（橙）— グロー付き */}
         {fdPoly && finalDecisionStock.length > 1 && visible.fd && (
           <>
+            {/* 外側グロー */}
+            <polyline points={fdPoly} fill="none" stroke="#f59e0b" strokeWidth={10}
+              strokeLinecap="round" strokeLinejoin="round" opacity={0.15}/>
+            <polyline points={fdPoly} fill="none" stroke="#f59e0b" strokeWidth={5}
+              strokeLinecap="round" strokeLinejoin="round" opacity={0.25}/>
+            {/* メインライン */}
             <polyline points={fdPoly} fill="none" stroke="#f59e0b" strokeWidth={3}
-              strokeLinecap="round" strokeLinejoin="round"/>
+              strokeLinecap="round" strokeLinejoin="round" filter="url(#fdGlow)"/>
             {finalDecisionStock.map((v,i) => (
-              <circle key={i} cx={sx(months[i])} cy={sy(v)} r={hoverIdx===i ? 6 : 3.5}
-                fill="#f59e0b" stroke="#fff" strokeWidth={1.5} style={{ transition: 'r 0.1s' }}/>
+              <g key={i}>
+                {/* 外周グロー */}
+                <circle cx={sx(months[i])} cy={sy(v)} r={hoverIdx===i ? 9 : 6}
+                  fill="#f59e0b" opacity={0.18}/>
+                {/* 本体 */}
+                <circle cx={sx(months[i])} cy={sy(v)} r={hoverIdx===i ? 6 : 4}
+                  fill="#f59e0b" stroke="#fff" strokeWidth={2} style={{ transition: 'r 0.1s' }}/>
+              </g>
             ))}
           </>
         )}
